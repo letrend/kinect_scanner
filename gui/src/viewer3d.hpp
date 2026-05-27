@@ -39,6 +39,7 @@ public slots:
     void setShowPointCloud(bool s) { m_showPoints = s; update(); }
     void setShowMesh(bool s)       { m_showMesh   = s; update(); }
     void setShowTrajectory(bool s) { m_showTraj   = s; update(); }
+    void setShowCamera(bool s)     { m_showCamera = s; update(); }
 
 protected:
     void initializeGL() override;
@@ -53,12 +54,13 @@ private:
     void uploadMesh();
     void uploadBounds();
     void uploadTraj();
+    void uploadCamera();
 
     // GL resources
     QOpenGLShaderProgram m_progColor; // point/line: vertex colour
     QOpenGLShaderProgram m_progMesh;  // mesh: simple Phong + vertex colour
 
-    QOpenGLVertexArrayObject m_vaoPoints, m_vaoMesh, m_vaoBox, m_vaoTraj;
+    QOpenGLVertexArrayObject m_vaoPoints, m_vaoMesh, m_vaoBox, m_vaoTraj, m_vaoCam;
     QOpenGLBuffer m_vboPointsXyz{QOpenGLBuffer::VertexBuffer};
     QOpenGLBuffer m_vboPointsRgb{QOpenGLBuffer::VertexBuffer};
     QOpenGLBuffer m_vboMeshXyz{QOpenGLBuffer::VertexBuffer};
@@ -66,6 +68,8 @@ private:
     QOpenGLBuffer m_iboMesh{QOpenGLBuffer::IndexBuffer};
     QOpenGLBuffer m_vboBox{QOpenGLBuffer::VertexBuffer};
     QOpenGLBuffer m_vboTraj{QOpenGLBuffer::VertexBuffer};
+    QOpenGLBuffer m_vboCam{QOpenGLBuffer::VertexBuffer};
+    int m_camVertexCount = 0;
 
     // CPU-side data
     QVector<float>         m_pointsXyz;
@@ -80,6 +84,10 @@ private:
 
     QVector<float> m_trajXyz; // appended each pose update
     bool m_trajDirty = false;
+
+    QMatrix4x4 m_camPose;
+    bool m_camPoseValid = false;
+    bool m_showCamera = true;
 
     QVector3D m_boundsM{4.0f, 4.0f, 4.0f};
     bool m_boundsDirty = true;

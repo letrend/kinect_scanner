@@ -68,9 +68,9 @@ Viewer3D::~Viewer3D() {
     makeCurrent();
     m_vboPointsXyz.destroy(); m_vboPointsRgb.destroy();
     m_vboMeshXyz.destroy(); m_vboMeshRgb.destroy(); m_iboMesh.destroy();
-    m_vboBox.destroy(); m_vboTraj.destroy();
+    m_vboBox.destroy(); m_vboTraj.destroy(); m_vboCam.destroy();
     m_vaoPoints.destroy(); m_vaoMesh.destroy();
-    m_vaoBox.destroy(); m_vaoTraj.destroy();
+    m_vaoBox.destroy(); m_vaoTraj.destroy(); m_vaoCam.destroy();
     doneCurrent();
 }
 
@@ -92,6 +92,7 @@ void Viewer3D::initializeGL() {
     initVao(m_vaoMesh);
     initVao(m_vaoBox);
     initVao(m_vaoTraj);
+    initVao(m_vaoCam);
     m_vboPointsXyz.create();
     m_vboPointsRgb.create();
     m_vboMeshXyz.create();
@@ -99,6 +100,8 @@ void Viewer3D::initializeGL() {
     m_iboMesh.create();
     m_vboBox.create();
     m_vboTraj.create();
+    m_vboCam.create();
+    uploadCamera();
 }
 
 void Viewer3D::resizeGL(int w, int h) {
@@ -193,6 +196,40 @@ void Viewer3D::uploadTraj() {
     m_trajDirty = false;
 }
 
+void Viewer3D::uploadCamera() {
+    // Wireframe pyramid in *camera-local* coordinates (OpenCV style:
+    // +X right, +Y down, +Z forward). Apex at origin, base at z=d.
+    const float d = 0.20f;                          // 20 cm
+    const float w = d * std::tan(0.5f * 70.0f * float(M_PI) / 180.0f); // ~RGB hfov
+    const float h = d * std::tan(0.5f * 60.0f * float(M_PI) / 180.0f); // ~RGB vfov
+    const float r = 0.10f, g = 1.00f, b = 1.00f;     // cyan
+    // Apex
+    QVector3D A(0, 0, 0);
+    // Base corners (TL, TR, BR, BL)
+    QVector3D TL(-w, -h, d), TR( w, -h, d), BR( w, h, d), BL(-w, h, d);
+    QVector3D U( 0, -h * 1.35f, d); // little "up" tick so orientation is unambiguous
+    auto seg = [&](QVector<float> &v, QVector3D a, QVector3D bp) {
+        v.append(a.x()); v.append(a.y()); v.append(a.z());
+        v.append(r); v.append(g); v.append(b);
+        v.append(bp.x()); v.append(bp.y()); v.append(bp.z());
+        v.append(r); v.append(g); v.append(b);
+    };
+    QVector<float> data;
+    seg(data, A, TL); seg(data, A, TR); seg(data, A, BR); seg(data, A, BL);
+    seg(data, TL, TR); seg(data, TR, BR); seg(data, BR, BL); seg(data, BL, TL);
+    seg(data, TL, U);  seg(data, TR, U);   // "up" triangle on top of frustum
+    m_camVertexCount = data.size() / 6;
+    m_vaoCam.bind();
+    m_vboCam.bind();
+    m_vboCam.allocate(data.constData(), data.size() * sizeof(float));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float),
+                          (void*)(3*sizeof(float)));
+    m_vaoCam.release();
+}
+
 void Viewer3D::paintGL() {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -215,11 +252,15 @@ void Viewer3D::paintGL() {
     if (m_meshDirty   && !m_meshXyz.isEmpty())   uploadMesh();
     if (m_trajDirty   && !m_trajXyz.isEmpty())   uploadTraj();
 
+    // Kinect/OpenCV camera frame is +Y down; flip Y to render upright.
+    QMatrix4x4 flipY;
+    flipY.scale(1.0f, -1.0f, 1.0f);
+
     // --- Box ---
     {
         m_progColor.bind();
         m_progColor.setUniformValue("uMVP", mvp);
-        m_progColor.setUniformValue("uModel", QMatrix4x4{});
+        m_progColor.setUniformValue("uModel", flipY);
         m_vaoBox.bind();
         glDrawArrays(GL_LINES, 0, 24);
         m_vaoBox.release();
@@ -229,7 +270,7 @@ void Viewer3D::paintGL() {
     if (m_showPoints && !m_pointsXyz.isEmpty()) {
         m_progColor.bind();
         m_progColor.setUniformValue("uMVP", mvp);
-        m_progColor.setUniformValue("uModel", m_pointsPose);
+        m_progColor.setUniformValue("uModel", flipY * m_pointsPose);
         m_vaoPoints.bind();
         glDrawArrays(GL_POINTS, 0, m_pointsXyz.size()/3);
         m_vaoPoints.release();
@@ -239,7 +280,7 @@ void Viewer3D::paintGL() {
     if (m_showMesh && !m_meshIdx.isEmpty()) {
         m_progMesh.bind();
         m_progMesh.setUniformValue("uMVP", mvp);
-        m_progMesh.setUniformValue("uModel", QMatrix4x4{});
+        m_progMesh.setUniformValue("uModel", flipY);
         m_progMesh.setUniformValue("uLightDir", QVector3D(0.3f, 0.8f, 0.5f));
         m_vaoMesh.bind();
         glDrawElements(GL_TRIANGLES, m_meshIdx.size(), GL_UNSIGNED_INT, nullptr);
@@ -250,10 +291,20 @@ void Viewer3D::paintGL() {
     if (m_showTraj && m_trajXyz.size() >= 6) {
         m_progColor.bind();
         m_progColor.setUniformValue("uMVP", mvp);
-        m_progColor.setUniformValue("uModel", QMatrix4x4{});
+        m_progColor.setUniformValue("uModel", flipY);
         m_vaoTraj.bind();
         glDrawArrays(GL_LINE_STRIP, 0, m_trajXyz.size()/3);
         m_vaoTraj.release();
+        m_progColor.release();
+    }
+    // --- Camera frustum at estimated pose ---
+    if (m_showCamera && m_camPoseValid && m_camVertexCount > 0) {
+        m_progColor.bind();
+        m_progColor.setUniformValue("uMVP", mvp);
+        m_progColor.setUniformValue("uModel", flipY * m_camPose);
+        m_vaoCam.bind();
+        glDrawArrays(GL_LINES, 0, m_camVertexCount);
+        m_vaoCam.release();
         m_progColor.release();
     }
 }
@@ -265,6 +316,8 @@ void Viewer3D::setPointCloud(const QVector<float> &xyz,
     m_pointsRgb = rgb;
     m_pointsPose = pose;
     m_pointsDirty = true;
+    m_camPose = pose;
+    m_camPoseValid = true;
     // append camera origin to trajectory
     m_trajXyz.append(pose(0,3));
     m_trajXyz.append(pose(1,3));

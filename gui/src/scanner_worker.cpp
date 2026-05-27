@@ -69,16 +69,10 @@ ScanParameters ScannerWorker::currentParameters() const {
 }
 
 void ScannerWorker::initialize(ScanParameters params) {
-    fprintf(stderr, "[worker] initialize() entered on thread %p\n", (void*)QThread::currentThreadId());
-    fflush(stderr);
     try {
         params.useDisplay = false;
-        fprintf(stderr, "[worker] creating VolumeIntegration(%u,%u,%u,%.4f)\n",
-                params.xDim, params.yDim, params.zDim, params.voxelSize);
-        fflush(stderr);
         m_scanner.reset(new VolumeIntegration(params.xDim, params.yDim,
                                               params.zDim, params.voxelSize));
-        fprintf(stderr, "[worker] VolumeIntegration constructed\n"); fflush(stderr);
         m_scanner->setParameters(params);
         m_scanner->setOnFrame([this](const FrameBundle &fb) {
             emitFromBundle(fb);
@@ -89,19 +83,14 @@ void ScannerWorker::initialize(ScanParameters params) {
         m_initialized = true;
         emit initialized();
         emit statusMessage("Scanner initialized");
-        fprintf(stderr, "[worker] initialize() done\n"); fflush(stderr);
     } catch (const std::exception &e) {
-        fprintf(stderr, "[worker] initialize() exception: %s\n", e.what()); fflush(stderr);
         emit error(QString("Scanner init failed: %1").arg(e.what()));
     } catch (...) {
-        fprintf(stderr, "[worker] initialize() unknown exception\n"); fflush(stderr);
         emit error("Scanner init failed: unknown error");
     }
 }
 
 void ScannerWorker::start() {
-    fprintf(stderr, "[worker] start() entered on thread %p\n", (void*)QThread::currentThreadId());
-    fflush(stderr);
     if (!m_scanner) {
         emit error("start() called before initialize()");
         return;

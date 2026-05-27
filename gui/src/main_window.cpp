@@ -243,6 +243,8 @@ void MainWindow::onCalibrate() {
 
 void MainWindow::onWorkerInitialized() {
     onStatus("Worker ready.");
+    // Auto-start scanning so debugging cycles don't require clicking Start.
+    QMetaObject::invokeMethod(m_worker, "start", Qt::QueuedConnection);
 }
 
 void MainWindow::onWorkerStarted() {

@@ -37,9 +37,9 @@ VolumeIntegration::VolumeIntegration(uint xDim, uint yDim, uint zDim, float voxe
     nc = 3;
 
     // Initialize Kinect
-    fprintf(stderr, "[VI] before MyFreenectDevice\n"); fflush(stderr);
+
     device = new MyFreenectDevice;
-    fprintf(stderr, "[VI] after MyFreenectDevice\n"); fflush(stderr);
+
 
     dataFolder = "/home/roboy/workspace/kinect_scanner/build/data/";//string(STR(TSDF_CUDA_SOURCE_DIR))+ "/data/";
 
@@ -181,12 +181,10 @@ VolumeIntegration::VolumeIntegration(uint xDim, uint yDim, uint zDim, float voxe
     mOut = cv::Mat(pHeight, pWidth, CV_32FC3);
 
     // initialize icpcuda
-    fprintf(stderr, "[VI] init ICPCUDA\n"); fflush(stderr);
     icp = std::shared_ptr<ICPCUDA>(new ICPCUDA(pWidth, pHeight, device->irCameraParams.cx,
                       device->irCameraParams.cy, device->irCameraParams.fx,
                       device->irCameraParams.fy,
                       m_params.icpDistThresh, m_params.icpAngleThresh));
-    fprintf(stderr, "[VI] ctor done (skipping blocking first updateFrames)\n"); fflush(stderr);
 }
 VolumeIntegration::~VolumeIntegration(){
     cudaFree(d_depth);

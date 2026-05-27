@@ -36,7 +36,7 @@ if(POLICY CMP0146)
     cmake_policy(SET CMP0146 OLD)
 endif()
 FIND_PACKAGE(CUDA REQUIRED)
-SET(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -Xcompiler -g --use_fast_math -Xcompiler -O3)
+SET(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -Xcompiler -g -Xcompiler -O3 --use_fast_math)
 # -gencode is GPU-arch dependent; auto-detect at configure time if not provided.
 # CUDA_ARCH may be a single value ("75") or a list ("61;75;86").
 if(NOT DEFINED CUDA_ARCH)
