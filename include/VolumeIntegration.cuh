@@ -9,7 +9,25 @@
 #include "kinect.hpp"
 #include "icp_wrapper.hpp"
 #include "calibration.hpp"
+#include "scan_parameters.hpp"
 #include <memory>
+#include <mutex>
+#include <atomic>
+#include <functional>
+
+/**
+ * Bundle of host-side frame data emitted to the GUI via callback once per step.
+ * Mats are deep-copied owners so the GUI can hold them on another thread.
+ */
+struct FrameBundle {
+    cv::Mat rgb;            // CV_32FC3, 512x424, range [0,1]
+    cv::Mat depthMM;        // CV_32FC1, depth in millimeters
+    cv::Mat raycastRGB;     // CV_32FC3, raycasted color (empty until 2nd frame)
+    cv::Mat raycastDepth;   // CV_32FC1, raycasted depth in mm (empty until 2nd frame)
+    Eigen::Matrix4f pose = Eigen::Matrix4f::Identity();
+    unsigned long long frameIndex = 0;
+    float fps = 0.0f;
+};
 
 #define STR1(x)  #x
 #define STR(x)  STR1(x)
@@ -21,6 +39,7 @@ void cuda_check(string file, int line);
 #define CUDA_CHECK cuda_check(__FILE__,__LINE__)
 
 //! intrinsic matrix in constant memory on device
+#ifdef __CUDACC__
 __constant__ float c_k[3 * 3];
 //! inverse intrinsic matrix in constant memory on device
 __constant__ float c_kinv[3 * 3];
@@ -52,19 +71,56 @@ __device__ __inline__ float3 deviceGetVoxelGridCoordinates(float3 camera, float 
 __global__ void deviceRaycast(float *d_voxelTSDF, float *d_depthModel, unsigned char *d_voxelRed, unsigned char *d_voxelGreen,
                               unsigned char *d_voxelBlue, size_t pWidth, size_t pHeight, size_t vWidth,
                               size_t vHeight, size_t slices, float voxelSize, float near, float far, float step, float *d_img);
+#endif
 
 class VolumeIntegration{
 public:
     VolumeIntegration(uint xDim=400, uint yDim=400, uint zDim=400, float voxelsize=0.01f);
     ~VolumeIntegration();
     /**
-     * Initializes the voxel grid position depending on the depth data
+     * Initializes the voxel grid position depending on the depth data.
+     * In GUI mode (useDisplay=false) the grid is centred on the first valid frame
+     * automatically without blocking on user input.
      */
     bool intializeGridPosition();
     /**
-     * the actual volume integration happens in here
+     * Run the full scan loop until ESC (CLI) or requestStop() (GUI).
      */
     void scan();
+    /**
+     * Run a single iteration of the scan loop. Returns false on capture error,
+     * pause, or stop request. Intended for the GUI worker thread.
+     */
+    bool stepOnce();
+    /**
+     * Signal scan()/stepOnce() loops to exit at the next opportunity.
+     */
+    void requestStop();
+    /**
+     * When paused, stepOnce() still pulls frames so the preview keeps updating
+     * but skips ICP/TSDF integration.
+     */
+    void setPaused(bool paused);
+    bool isPaused() const { return m_paused.load(); }
+    /**
+     * Clear the TSDF/weight/color volumes and reset pose to identity.
+     * Volume dimension/voxelSize changes in m_params take effect via reset()
+     * by re-allocating GPU buffers.
+     */
+    void reset();
+    /**
+     * Thread-safe parameter setter/getter.
+     */
+    void setParameters(const ScanParameters &p);
+    ScanParameters getParameters() const;
+    /**
+     * Callback installed by the GUI worker. Invoked once per stepOnce() with
+     * deep-copied cv::Mats. Pass an empty std::function to disable.
+     */
+    using FrameCallback = std::function<void(const FrameBundle&)>;
+    using StatusCallback = std::function<void(const std::string&)>;
+    void setOnFrame(FrameCallback cb);
+    void setOnStatus(StatusCallback cb);
     /**
      * marching cubes extracts the isosurface
      */
@@ -77,6 +133,20 @@ public:
      * calibrate this function calibrates the webcam using opencvs chessboard calibration
      */
     bool calibrate();
+
+    // ---- Read-only accessors used by the GUI ----
+    Eigen::Matrix4f currentPose() const { return pose; }
+    unsigned long long frameCount() const { return m_frame; }
+    size_t volumeWidth()  const { return vWidth; }
+    size_t volumeHeight() const { return vHeight; }
+    size_t volumeDepth()  const { return slices; }
+    float  volumeVoxelSize() const { return voxelSize; }
+    const float* hostTSDF()  const { return tsdf; }
+    const unsigned char* hostRed()   const { return red; }
+    const unsigned char* hostGreen() const { return green; }
+    const unsigned char* hostBlue()  const { return blue; }
+    const MarchingCubes* mesh() const { return mc; }
+    MyFreenectDevice* kinect() { return device; }
 
 private:
     void calculateVoxelGridPosition(float3 *voxels, float* depth, size_t n, float vWidth,
@@ -100,6 +170,20 @@ private:
     float maxTruncation;
     //! voxelSize in meters
     float voxelSize;
+    //! tunables shared with GUI; guarded by m_paramsMutex
+    mutable std::mutex m_paramsMutex;
+    ScanParameters m_params;
+    //! lifecycle flags
+    std::atomic<bool> m_stopRequested{false};
+    std::atomic<bool> m_paused{false};
+    //! frame counter (visible to GUI)
+    std::atomic<unsigned long long> m_frame{0};
+    //! optional GUI callbacks (installed under m_paramsMutex)
+    FrameCallback  m_onFrame;
+    StatusCallback m_onStatus;
+    //! FPS smoothing
+    double m_lastFrameTimeSec = 0.0;
+    float  m_fps = 0.0f;
     //! kinect device
     MyFreenectDevice *device;
     //! savePath
@@ -122,8 +206,7 @@ private:
 
     size_t bytesFloat, bytesFloatColor, bytesFloat3;
 
-    //! bilateral filter parameters
-    static constexpr float sigma_r = 5.0f, sigma_d = 5.0f;
+
 public:
     int domain_kernel_width, domain_kernel_height;
     float* domain_kernel;

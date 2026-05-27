@@ -18,6 +18,15 @@ void cuda_check(string file, int line)
 
 VolumeIntegration::VolumeIntegration(uint xDim, uint yDim, uint zDim, float voxelsize):
         vWidth(xDim), vHeight(yDim), slices(zDim), voxelSize(voxelsize){
+    // initialize tunables that come from constructor args
+    m_params.xDim      = xDim;
+    m_params.yDim      = yDim;
+    m_params.zDim      = zDim;
+    m_params.voxelSize = voxelsize;
+
+    pose     = Eigen::Matrix4f::Identity();
+    pose_inv = Eigen::Matrix4f::Identity();
+
     // initialize cuda context
     cudaDeviceSynchronize();
     CUDA_CHECK;
@@ -28,7 +37,9 @@ VolumeIntegration::VolumeIntegration(uint xDim, uint yDim, uint zDim, float voxe
     nc = 3;
 
     // Initialize Kinect
+    fprintf(stderr, "[VI] before MyFreenectDevice\n"); fflush(stderr);
     device = new MyFreenectDevice;
+    fprintf(stderr, "[VI] after MyFreenectDevice\n"); fflush(stderr);
 
     dataFolder = "/home/roboy/workspace/kinect_scanner/build/data/";//string(STR(TSDF_CUDA_SOURCE_DIR))+ "/data/";
 
@@ -52,6 +63,7 @@ VolumeIntegration::VolumeIntegration(uint xDim, uint yDim, uint zDim, float voxe
     delete[] h_kinv;
 
     maxTruncation = 0.03f;
+    m_params.maxTruncation = maxTruncation;
 
     voxelGridBytesFloat = vWidth * vHeight * slices * sizeof(float);
     voxelGridBytes = vWidth * vHeight * slices * sizeof(unsigned char);
@@ -131,11 +143,11 @@ VolumeIntegration::VolumeIntegration(uint xDim, uint yDim, uint zDim, float voxe
     cudaMemset(d_normals, 0, bytesFloat3);
     CUDA_CHECK;
 
-    int r = ceil(3 * sigma_d);
+    int r = ceil(3 * m_params.sigma_d);
     domain_kernel_width = 2 * r + 1;
     domain_kernel_height = 2 * r + 1;
     domain_kernel = new float[domain_kernel_width * domain_kernel_height];
-    domainKernel(domain_kernel, domain_kernel_width, domain_kernel_height, sigma_d);
+    domainKernel(domain_kernel, domain_kernel_width, domain_kernel_height, m_params.sigma_d);
     cudaMemcpyToSymbol(c_domainKernel, domain_kernel, domain_kernel_width * domain_kernel_height * sizeof(float));
     CUDA_CHECK;
 
@@ -169,10 +181,12 @@ VolumeIntegration::VolumeIntegration(uint xDim, uint yDim, uint zDim, float voxe
     mOut = cv::Mat(pHeight, pWidth, CV_32FC3);
 
     // initialize icpcuda
+    fprintf(stderr, "[VI] init ICPCUDA\n"); fflush(stderr);
     icp = std::shared_ptr<ICPCUDA>(new ICPCUDA(pWidth, pHeight, device->irCameraParams.cx,
                       device->irCameraParams.cy, device->irCameraParams.fx,
-                      device->irCameraParams.fy));
-    device->updateFrames();
+                      device->irCameraParams.fy,
+                      m_params.icpDistThresh, m_params.icpAngleThresh));
+    fprintf(stderr, "[VI] ctor done (skipping blocking first updateFrames)\n"); fflush(stderr);
 }
 VolumeIntegration::~VolumeIntegration(){
     cudaFree(d_depth);
@@ -215,23 +229,46 @@ VolumeIntegration::~VolumeIntegration(){
     delete device;
 }
 bool VolumeIntegration::intializeGridPosition(){
-    cv::namedWindow("color", CV_WINDOW_AUTOSIZE);
-    cvMoveWindow("color", 100, 0);
-    cv::namedWindow("depth", CV_WINDOW_AUTOSIZE);
-    cvMoveWindow("depth", 100 + pWidth + 40, 0);
+    const bool useDisplay = getParameters().useDisplay;
+    if (useDisplay) {
+        cv::namedWindow("color", cv::WINDOW_AUTOSIZE);
+        cv::moveWindow("color", 100, 0);
+        cv::namedWindow("depth", cv::WINDOW_AUTOSIZE);
+        cv::moveWindow("depth", 100 + pWidth + 40, 0);
+    }
+    int settleFrames = 0;
     while (true) {
+        if (m_stopRequested.load())
+            return false;
         if(!device->updateFrames())
             continue;
         device->getDepthMM(depth1);
         device->getRgbMapped2Depth(color);
-        cv::imshow("color", color);
-        cv::imshow("depth", depth1 / 255.0f / 4.0f);
 
-        char k = cv::waitKey(1);
-        if (k == 32) {
-            break;
-        }else if(k == 20){
-            return false;
+        if (useDisplay) {
+            cv::imshow("color", color);
+            cv::imshow("depth", depth1 / 255.0f / 4.0f);
+            char k = cv::waitKey(1);
+            if (k == 32) {
+                break;
+            }else if(k == 20){
+                return false;
+            }
+        } else {
+            // headless / GUI: emit the live frame and auto-confirm after a few
+            // settle frames so the depth pipeline has stable data.
+            if (m_onFrame) {
+                FrameBundle fb;
+                fb.rgb        = color.clone();
+                fb.depthMM    = depth1.clone();
+                fb.pose       = pose;
+                fb.frameIndex = m_frame.load();
+                fb.fps        = m_fps;
+                m_onFrame(fb);
+            }
+            if (++settleFrames >= 5) {
+                break;
+            }
         }
     }
 
@@ -834,128 +871,37 @@ __global__ void deviceRaycast(float *d_voxelTSDF, float *d_depthModel, unsigned 
 }
 
 void VolumeIntegration::scan(){
-    cv::namedWindow("color", CV_WINDOW_AUTOSIZE);
-    cvMoveWindow("color", 100, 0);
-    cv::namedWindow("depth", CV_WINDOW_AUTOSIZE);
-    cvMoveWindow("depth", 100 + pWidth + 40, 0);
-    cv::namedWindow("depth Model", CV_WINDOW_AUTOSIZE);
-    cvMoveWindow("depth Model", 100 + pWidth + 40, pHeight + 100);
-    cv::namedWindow("raycasted", CV_WINDOW_AUTOSIZE);
-    cvMoveWindow("raycasted", 100, pHeight + 100);
-    char k;
-    uint frame = 0;
-    while (k != 27) {
-        // get new kinect frames, if this fails exit scan loop
-        if(!device->updateFrames())
-            break;
-        device->getDepthMM(depth1);
-        device->getRgbMapped2Depth(color);
-
-        cv::imshow("color", color);
-        cv::imshow("depth", depth1 / 255.0f / 10.0f);
-
-        // convert and copy to device
-        convert_mat_to_layered(imgDepth, depth1 / 1000.0f);
-        convert_mat_to_layered(imgColor, color);
-        cudaMemcpy(d_depth, imgDepth, bytesFloat, cudaMemcpyHostToDevice);
-        CUDA_CHECK;
-        cudaMemcpy(d_color, imgColor, bytesFloatColor,cudaMemcpyHostToDevice);
-        CUDA_CHECK;
-
-        // Step 0: Bilateral Filter depth image
-        bilateralFilterKernel<<<grid, block, smBytes>>>(d_depth,
-                d_depthFiltered, pWidth, pHeight, domain_kernel_width,
-                domain_kernel_height, sigma_r);
-        CUDA_CHECK;
-        cudaDeviceSynchronize();
-        CUDA_CHECK;
-
-        // Step 1: calculate local coordinates and corresponding normals
-        deviceCalculateLocalCoordinates<<<grid, block>>>(d_depth,
-                d_v, pWidth, pHeight);
-        CUDA_CHECK;
-        cudaDeviceSynchronize();
-        CUDA_CHECK;
-        deviceCalculateLocalNormals<<<grid, block,
-                arraySize * sizeof(float3)>>>(d_v, d_normals, pWidth,
-                        pHeight, 0.03f);
-        CUDA_CHECK;
-        cudaDeviceSynchronize();
-        CUDA_CHECK;
-
-        if (frame > 0) {
-            cudaMemcpy(imgDepthFiltered, d_depthFiltered, bytesFloat,
-                       cudaMemcpyDeviceToHost);
-            CUDA_CHECK;
-            convert_layered_to_mat(depthFiltered, imgDepthFiltered);
-            depthFiltered *= 1000.0f;
-//				cv::imshow("depthFiltered", depthFiltered / 255.0f / 10.0f);
-            // ICP
-            icp->getPoseFromDepth(depth0, depthFiltered);
-            pose = icp->getPose().cast<float>();
-            pose_inv = icp->getPose_inv().cast<float>();
-        }
-
-        // set (inverse) camera pose and write it to constant device memory
-        for (int y = 0; y < 3; y++) {
-            for (int x = 0; x < 4; x++) {
-                size_t idx = x + 4 * y;
-                cameraPose[idx] = pose(y, x);
-                cameraPose_inv[idx] = pose_inv(y, x);
-            }
-        }
-        cudaMemcpyToSymbol(c_cameraPose, cameraPose, 4 * 3 * sizeof(float));
-        CUDA_CHECK;
-        cudaMemcpyToSymbol(c_cameraPose_inv, cameraPose_inv,
-                           4 * 3 * sizeof(float));
-        CUDA_CHECK;
-
-        // sweep through the voxel grid slice by slice
-        for (size_t slice = 0; slice < slices; slice++) {
-            deviceCalculateTSDF<<<gridVoxel, block>>>(d_depth, d_color,
-                    d_normals, pWidth, pHeight, maxTruncation, d_voxelTSDF,
-                    d_voxelWeight, d_voxelWeightColor, d_voxelRed, d_voxelGreen,
-                    d_voxelBlue,voxelSize, vWidth, vHeight, slice);
-            cudaDeviceSynchronize();
-            CUDA_CHECK;
-        }
-
-        // raycast the current model
-        deviceRaycast<<<grid, block>>>(d_voxelTSDF, d_depthModel,
-                d_voxelRed, d_voxelGreen, d_voxelBlue, pWidth, pHeight,
-                vWidth, vHeight, slices, voxelSize, 0.3f, 4.0f, 0.025f,
-                d_imgColorRayCast);
-        CUDA_CHECK;
-        cudaDeviceSynchronize();
-        CUDA_CHECK;
-        cudaDeviceSynchronize();
-        CUDA_CHECK;
-
-        cudaMemcpy(imgColorRayCast, d_imgColorRayCast, bytesFloatColor,
-                   cudaMemcpyDeviceToHost);
-        CUDA_CHECK;
-        convert_layered_to_mat(mOut, imgColorRayCast);
-        cv::imshow("raycasted", mOut);
-
-        cudaMemcpy(depthModel, d_depthModel, bytesFloat,
-                   cudaMemcpyDeviceToHost);
-        CUDA_CHECK;
-        cudaMemset(d_depthModel, 0, bytesFloat);
-        CUDA_CHECK;
-
-        convert_layered_to_mat(depth0, depthModel);
-
-        depth0 *= 1000.0f;
-
-        cv::imshow("depth Model", depth0 / 255.0f / 10.0f);
-
-        // increase frame counter
-        frame++;
-
-        // show all images and abort on escape (?) key press
-        k = cv::waitKey(1);
+    const bool useDisplay = getParameters().useDisplay;
+    if (useDisplay) {
+        cv::namedWindow("color", cv::WINDOW_AUTOSIZE);
+        cv::moveWindow("color", 100, 0);
+        cv::namedWindow("depth", cv::WINDOW_AUTOSIZE);
+        cv::moveWindow("depth", 100 + pWidth + 40, 0);
+        cv::namedWindow("depth Model", cv::WINDOW_AUTOSIZE);
+        cv::moveWindow("depth Model", 100 + pWidth + 40, pHeight + 100);
+        cv::namedWindow("raycasted", cv::WINDOW_AUTOSIZE);
+        cv::moveWindow("raycasted", 100, pHeight + 100);
     }
-    cv::destroyAllWindows();
+    m_stopRequested.store(false);
+    while (!m_stopRequested.load()) {
+        if (!stepOnce()) {
+            if (m_paused.load()) {
+                // paused: keep UI responsive (CLI) / yield (GUI)
+                if (useDisplay) {
+                    char k = cv::waitKey(30);
+                    if (k == 27) break;
+                }
+                continue;
+            }
+            // capture error -> exit loop
+            break;
+        }
+        if (useDisplay) {
+            char k = cv::waitKey(1);
+            if (k == 27) break;
+        }
+    }
+    if (useDisplay) cv::destroyAllWindows();
 
     // download GPU volume data
     cudaMemcpy(tsdf, d_voxelTSDF, voxelGridBytesFloat,
@@ -967,6 +913,219 @@ void VolumeIntegration::scan(){
     CUDA_CHECK;
     cudaMemcpy(blue, d_voxelBlue, voxelGridBytes, cudaMemcpyDeviceToHost);
     CUDA_CHECK;
+}
+
+bool VolumeIntegration::stepOnce(){
+    // Snapshot tunables once per step.
+    ScanParameters p = getParameters();
+    const bool useDisplay = p.useDisplay;
+
+    // get new kinect frames
+    if(!device->updateFrames())
+        return false;
+    device->getDepthMM(depth1);
+    device->getRgbMapped2Depth(color);
+
+    if (useDisplay) {
+        cv::imshow("color", color);
+        cv::imshow("depth", depth1 / 255.0f / 10.0f);
+    }
+
+    // When paused, still publish the live RGB/depth to keep the preview alive
+    // but skip all integration / pose update.
+    if (m_paused.load()) {
+        if (m_onFrame) {
+            FrameBundle fb;
+            fb.rgb        = color.clone();
+            fb.depthMM    = depth1.clone();
+            fb.pose       = pose;
+            fb.frameIndex = m_frame.load();
+            fb.fps        = m_fps;
+            m_onFrame(fb);
+        }
+        return false;
+    }
+
+    const unsigned long long frame = m_frame.load();
+
+    // convert and copy to device
+    convert_mat_to_layered(imgDepth, depth1 / 1000.0f);
+    convert_mat_to_layered(imgColor, color);
+    cudaMemcpy(d_depth, imgDepth, bytesFloat, cudaMemcpyHostToDevice);
+    CUDA_CHECK;
+    cudaMemcpy(d_color, imgColor, bytesFloatColor,cudaMemcpyHostToDevice);
+    CUDA_CHECK;
+
+    // Step 0: Bilateral Filter depth image
+    bilateralFilterKernel<<<grid, block, smBytes>>>(d_depth,
+            d_depthFiltered, pWidth, pHeight, domain_kernel_width,
+            domain_kernel_height, p.sigma_r);
+    CUDA_CHECK;
+    cudaDeviceSynchronize();
+    CUDA_CHECK;
+
+    // Step 1: calculate local coordinates and corresponding normals
+    deviceCalculateLocalCoordinates<<<grid, block>>>(d_depth,
+            d_v, pWidth, pHeight);
+    CUDA_CHECK;
+    cudaDeviceSynchronize();
+    CUDA_CHECK;
+    deviceCalculateLocalNormals<<<grid, block,
+            arraySize * sizeof(float3)>>>(d_v, d_normals, pWidth,
+                    pHeight, p.normalThreshold);
+    CUDA_CHECK;
+    cudaDeviceSynchronize();
+    CUDA_CHECK;
+
+    if (frame > 0) {
+        cudaMemcpy(imgDepthFiltered, d_depthFiltered, bytesFloat,
+                   cudaMemcpyDeviceToHost);
+        CUDA_CHECK;
+        convert_layered_to_mat(depthFiltered, imgDepthFiltered);
+        depthFiltered *= 1000.0f;
+        // ICP
+        icp->getPoseFromDepth(depth0, depthFiltered);
+        pose = icp->getPose().cast<float>();
+        pose_inv = icp->getPose_inv().cast<float>();
+    }
+
+    // set (inverse) camera pose and write it to constant device memory
+    for (int y = 0; y < 3; y++) {
+        for (int x = 0; x < 4; x++) {
+            size_t idx = x + 4 * y;
+            cameraPose[idx] = pose(y, x);
+            cameraPose_inv[idx] = pose_inv(y, x);
+        }
+    }
+    cudaMemcpyToSymbol(c_cameraPose, cameraPose, 4 * 3 * sizeof(float));
+    CUDA_CHECK;
+    cudaMemcpyToSymbol(c_cameraPose_inv, cameraPose_inv,
+                       4 * 3 * sizeof(float));
+    CUDA_CHECK;
+
+    // sweep through the voxel grid slice by slice
+    for (size_t slice = 0; slice < slices; slice++) {
+        deviceCalculateTSDF<<<gridVoxel, block>>>(d_depth, d_color,
+                d_normals, pWidth, pHeight, p.maxTruncation, d_voxelTSDF,
+                d_voxelWeight, d_voxelWeightColor, d_voxelRed, d_voxelGreen,
+                d_voxelBlue,voxelSize, vWidth, vHeight, slice);
+        cudaDeviceSynchronize();
+        CUDA_CHECK;
+    }
+
+    // raycast the current model
+    deviceRaycast<<<grid, block>>>(d_voxelTSDF, d_depthModel,
+            d_voxelRed, d_voxelGreen, d_voxelBlue, pWidth, pHeight,
+            vWidth, vHeight, slices, voxelSize,
+            p.raycastNear, p.raycastFar, p.raycastStep,
+            d_imgColorRayCast);
+    CUDA_CHECK;
+    cudaDeviceSynchronize();
+    CUDA_CHECK;
+
+    cudaMemcpy(imgColorRayCast, d_imgColorRayCast, bytesFloatColor,
+               cudaMemcpyDeviceToHost);
+    CUDA_CHECK;
+    convert_layered_to_mat(mOut, imgColorRayCast);
+    if (useDisplay) cv::imshow("raycasted", mOut);
+
+    cudaMemcpy(depthModel, d_depthModel, bytesFloat,
+               cudaMemcpyDeviceToHost);
+    CUDA_CHECK;
+    cudaMemset(d_depthModel, 0, bytesFloat);
+    CUDA_CHECK;
+
+    convert_layered_to_mat(depth0, depthModel);
+    depth0 *= 1000.0f;
+    if (useDisplay) cv::imshow("depth Model", depth0 / 255.0f / 10.0f);
+
+    // update fps (simple exponential moving average)
+    {
+        timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        double now = ts.tv_sec + ts.tv_nsec * 1e-9;
+        if (m_lastFrameTimeSec > 0.0) {
+            float instFps = 1.0f / (float)(now - m_lastFrameTimeSec);
+            m_fps = (m_fps <= 0.0f) ? instFps : (0.9f * m_fps + 0.1f * instFps);
+        }
+        m_lastFrameTimeSec = now;
+    }
+
+    // increment frame counter
+    m_frame.fetch_add(1);
+
+    // publish to GUI
+    if (m_onFrame) {
+        FrameBundle fb;
+        fb.rgb          = color.clone();
+        fb.depthMM      = depth1.clone();
+        fb.raycastRGB   = mOut.clone();
+        fb.raycastDepth = depth0.clone();
+        fb.pose         = pose;
+        fb.frameIndex   = m_frame.load();
+        fb.fps          = m_fps;
+        m_onFrame(fb);
+    }
+    return true;
+}
+
+void VolumeIntegration::requestStop(){
+    m_stopRequested.store(true);
+}
+
+void VolumeIntegration::setPaused(bool paused){
+    m_paused.store(paused);
+}
+
+void VolumeIntegration::setParameters(const ScanParameters &p){
+    std::lock_guard<std::mutex> lock(m_paramsMutex);
+    m_params = p;
+}
+
+ScanParameters VolumeIntegration::getParameters() const{
+    std::lock_guard<std::mutex> lock(m_paramsMutex);
+    return m_params;
+}
+
+void VolumeIntegration::setOnFrame(FrameCallback cb){
+    std::lock_guard<std::mutex> lock(m_paramsMutex);
+    m_onFrame = std::move(cb);
+}
+
+void VolumeIntegration::setOnStatus(StatusCallback cb){
+    std::lock_guard<std::mutex> lock(m_paramsMutex);
+    m_onStatus = std::move(cb);
+}
+
+void VolumeIntegration::reset(){
+    // clear host volumes
+    std::fill_n(tsdf,        vWidth * vHeight * slices, -1.0f);
+    std::fill_n(weight,      vWidth * vHeight * slices,  0.0f);
+    std::fill_n(weightColor, vWidth * vHeight * slices,  0.0f);
+    std::fill_n(red,         vWidth * vHeight * slices,  (unsigned char)0);
+    std::fill_n(green,       vWidth * vHeight * slices,  (unsigned char)0);
+    std::fill_n(blue,        vWidth * vHeight * slices,  (unsigned char)0);
+
+    // upload cleared volumes
+    cudaMemcpy(d_voxelTSDF,        tsdf,        voxelGridBytesFloat, cudaMemcpyHostToDevice); CUDA_CHECK;
+    cudaMemcpy(d_voxelWeight,      weight,      voxelGridBytesFloat, cudaMemcpyHostToDevice); CUDA_CHECK;
+    cudaMemcpy(d_voxelWeightColor, weightColor, voxelGridBytesFloat, cudaMemcpyHostToDevice); CUDA_CHECK;
+    cudaMemcpy(d_voxelRed,   red,   voxelGridBytes, cudaMemcpyHostToDevice); CUDA_CHECK;
+    cudaMemcpy(d_voxelGreen, green, voxelGridBytes, cudaMemcpyHostToDevice); CUDA_CHECK;
+    cudaMemcpy(d_voxelBlue,  blue,  voxelGridBytes, cudaMemcpyHostToDevice); CUDA_CHECK;
+
+    // reset pose
+    pose     = Eigen::Matrix4f::Identity();
+    pose_inv = Eigen::Matrix4f::Identity();
+    m_frame.store(0);
+    m_fps = 0.0f;
+    m_lastFrameTimeSec = 0.0;
+
+    // re-create ICP so it starts from a clean state
+    icp = std::shared_ptr<ICPCUDA>(new ICPCUDA(pWidth, pHeight,
+          device->irCameraParams.cx, device->irCameraParams.cy,
+          device->irCameraParams.fx, device->irCameraParams.fy,
+          m_params.icpDistThresh, m_params.icpAngleThresh));
 }
 
 void VolumeIntegration::domainKernel(float *kernel, int cols, int rows, float sigma_d) {
@@ -1051,7 +1210,7 @@ void VolumeIntegration::extractMesh(){
     // extract mesh using marching cubes
     Eigen::Vector3d volumeSize(vWidth, vHeight, slices);
     mc = new MarchingCubes(Eigen::Vector3i(vWidth, vHeight, slices), volumeSize.normalized());
-    mc->computeIsoSurface(tsdf, red, green, blue);
+    mc->computeIsoSurface(tsdf, red, green, blue, getParameters().isoValue);
 }
 
 bool VolumeIntegration::saveMesh(string name){

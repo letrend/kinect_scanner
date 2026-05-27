@@ -239,7 +239,7 @@ static void saveCameraParams( Settings& s, Size& imageSize, Mat& cameraMatrix, M
                 s.flag & CALIB_FIX_ASPECT_RATIO ? " +fix_aspect_ratio" : "",
                 s.flag & CALIB_FIX_PRINCIPAL_POINT ? " +fix_principal_point" : "",
                 s.flag & CALIB_ZERO_TANGENT_DIST ? " +zero_tangent_dist" : "");
-        cvWriteComment(*fs, buf, 0);
+        fs.writeComment(buf, 0);
     }
 
     fs << "flags" << s.flag;

@@ -4,3 +4,6 @@
 [submodule "ICPCUDA"]
 	path = ICPCUDA
 	url = https://github.com/mp3guy/ICPCUDA
+[submodule "third_party/Sophus"]
+	path = third_party/Sophus
+	url = https://github.com/strasdat/Sophus.git
