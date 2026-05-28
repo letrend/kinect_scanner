@@ -291,28 +291,97 @@ bool VolumeIntegration::intializeGridPosition(){
 void VolumeIntegration::calculateVoxelGridPosition(float3 *voxels, float* depth, size_t n, float vWidth,
                                 float vHeight, float slices, float voxelSize, float *gridLocation)
 {
-    double3 centroid;
-    centroid.x = 0.0f;
-    centroid.y = 0.0f;
-    centroid.z = 0.0f;
+    // Heuristic object-of-interest detection:
+    //
+    //   1. Restrict to the central image region (the user typically frames
+    //      the object near the centre of the field of view; ignoring the
+    //      borders rejects walls/floor/ceiling which would otherwise
+    //      dominate a naive centroid).
+    //   2. Build a depth histogram from those pixels.
+    //   3. Pick the *closest* dominant peak (smallest z with count above a
+    //      fraction of the max histogram bin). This selects an object the
+    //      user is pointing the camera at over a more distant background
+    //      surface.
+    //   4. Take the centroid of all central-region points whose depth is
+    //      within a window around that peak; centre the voxel grid on it.
+    //
+    // Falls back to a simple <1.5 m centroid (the previous behaviour) if no
+    // good peak is found.
 
+    const size_t W = pWidth, H = pHeight;
+    // Central 60 % of the image.
+    const size_t x0 = W * 2 / 10, x1 = W * 8 / 10;
+    const size_t y0 = H * 2 / 10, y1 = H * 8 / 10;
+
+    const float zMin = 0.30f;   // metres, near-clip of Kinect v2
+    const float zMax = 4.00f;
+    const float binW = 0.05f;
+    const int nBins = (int)std::ceil((zMax - zMin) / binW);
+    std::vector<int> hist(nBins, 0);
+
+    for (size_t y = y0; y < y1; ++y) {
+        for (size_t x = x0; x < x1; ++x) {
+            float z = depth[x + W * y];
+            if (z <= zMin || z >= zMax) continue;
+            int b = (int)((z - zMin) / binW);
+            if (b >= 0 && b < nBins) ++hist[b];
+        }
+    }
+
+    int maxCount = 0;
+    for (int b = 0; b < nBins; ++b) if (hist[b] > maxCount) maxCount = hist[b];
+
+    int peakBin = -1;
+    if (maxCount > 200) {
+        const int floor = std::max(50, maxCount / 3);
+        // Closest bin (smallest depth) that crosses the floor.
+        for (int b = 0; b < nBins; ++b) {
+            if (hist[b] >= floor) { peakBin = b; break; }
+        }
+    }
+
+    double3 centroid{0.0, 0.0, 0.0};
     int count = 0;
-    vector<float3> centroidPoints;
-    for(size_t i = 0; i < n; i++) {
-        if(depth[i]==0.0f) {
-            continue;
+
+    if (peakBin >= 0) {
+        const float peakZ  = zMin + (peakBin + 0.5f) * binW;
+        const float window = 0.30f;  // ±30 cm around the peak
+        const float zLo = peakZ - window;
+        const float zHi = peakZ + window;
+        for (size_t y = y0; y < y1; ++y) {
+            for (size_t x = x0; x < x1; ++x) {
+                size_t i = x + W * y;
+                float z = depth[i];
+                if (z <= zLo || z >= zHi) continue;
+                centroid.x += voxels[i].x;
+                centroid.y += voxels[i].y;
+                centroid.z += voxels[i].z;
+                ++count;
+            }
         }
+    }
 
-        if(depth[i]<1.5f){
-
-            count++;
-
-            centroid.x += voxels[i].x;
-            centroid.y += voxels[i].y;
-            centroid.z += voxels[i].z;
-
-            centroidPoints.push_back(voxels[i]);
+    // Fallback: previous behaviour (all valid pixels <1.5 m, whole image).
+    if (count < 100) {
+        centroid = {0.0, 0.0, 0.0};
+        count = 0;
+        for(size_t i = 0; i < n; i++) {
+            if(depth[i] == 0.0f) continue;
+            if(depth[i] < 1.5f){
+                centroid.x += voxels[i].x;
+                centroid.y += voxels[i].y;
+                centroid.z += voxels[i].z;
+                ++count;
+            }
         }
+    }
+
+    if (count <= 0) {
+        // Last-resort: keep grid at origin.
+        gridLocation[0] = -(vWidth * voxelSize) / 2.0f;
+        gridLocation[1] = -(vHeight * voxelSize) / 2.0f;
+        gridLocation[2] = -(slices * voxelSize) / 2.0f;
+        return;
     }
 
     centroid.x /= count;

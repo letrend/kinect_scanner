@@ -42,6 +42,10 @@ public slots:
     void setShowMesh(bool s)       { m_showMesh   = s; update(); }
     void setShowTrajectory(bool s) { m_showTraj   = s; update(); }
     void setShowCamera(bool s)     { m_showCamera = s; update(); }
+    /// Camera lock: when enabled the GL camera mirrors the live Kinect pose
+    /// (third-person follow). When disabled the user controls an arcball.
+    void setCameraLocked(bool s)   { m_cameraLocked = s; update(); }
+    bool cameraLocked() const      { return m_cameraLocked; }
 
 protected:
     void initializeGL() override;
@@ -105,4 +109,11 @@ private:
     bool m_showPoints = true;
     bool m_showMesh   = true;
     bool m_showTraj   = true;
+    bool m_cameraLocked = true;
+
+    // Adaptive point-cloud cap: targets ~30 Hz repaint by measuring paintGL
+    // wall time and shrinking/growing the maximum accumulated point count.
+    int    m_maxPoints           = 500000;   // initial cap; auto-adjusted
+    double m_avgPaintMs          = 0.0;      // exponential moving average
+    static constexpr double kTargetFrameMs = 1000.0 / 30.0;
 };

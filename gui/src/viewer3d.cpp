@@ -1,5 +1,6 @@
 #include "viewer3d.hpp"
 
+#include <QElapsedTimer>
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <cmath>
@@ -231,30 +232,63 @@ void Viewer3D::uploadCamera() {
 }
 
 void Viewer3D::paintGL() {
+    QElapsedTimer paintTimer; paintTimer.start();
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     QMatrix4x4 proj;
-    proj.perspective(45.0f, width() / float(qMax(1, height())), 0.05f, 100.0f);
+    if (m_cameraLocked && m_camPoseValid) {
+        // Match the Kinect v2 IR sensor's vertical FOV (~60.4°). Aspect is
+        // forced to the sensor's 512x424 so the view feels like looking
+        // through the camera rather than the GL widget aspect.
+        const float kinectVFovDeg = 60.4f;
+        const float kinectAspect  = 512.0f / 424.0f;
+        proj.perspective(kinectVFovDeg, kinectAspect, 0.05f, 100.0f);
+    } else {
+        proj.perspective(45.0f, width() / float(qMax(1, height())), 0.05f, 100.0f);
+    }
+
+    // Kinect/OpenCV camera frame is +Y down; flip Y to render upright.
+    QMatrix4x4 flipY;
+    flipY.scale(1.0f, -1.0f, 1.0f);
 
     QMatrix4x4 view;
-    QVector3D eye = m_center;
-    float rad = m_distance;
-    float yaw = m_yawDeg * float(M_PI) / 180.0f;
-    float pitch = m_pitchDeg * float(M_PI) / 180.0f;
-    eye += QVector3D(rad * std::cos(pitch) * std::sin(yaw),
-                     rad * std::sin(pitch),
-                     rad * std::cos(pitch) * std::cos(yaw));
-    view.lookAt(eye, m_center, QVector3D(0, 1, 0));
+    if (m_cameraLocked && m_camPoseValid) {
+        // Build an explicit lookAt from the Kinect pose. The point cloud is
+        // already in *world* space (camera-space points were transformed via
+        // pose.map() on receipt) and drawn with model = flipY, i.e. world
+        // coordinates with Y negated to render upright.
+        //
+        // The Kinect camera basis is (X right, Y down, Z forward). To put
+        // the GL camera at the same physical location and aim it the same
+        // way, we extract those basis vectors from m_camPose, apply the
+        // same Y-flip the world uses, then feed lookAt:
+        //   eye      = flipY * cam_origin
+        //   forward  = flipY * cam_R * (0,0,1)
+        //   up       = flipY * cam_R * (0,-1,0)  // Kinect Y is down -> GL up
+        QVector3D camOrigin( m_camPose(0,3), m_camPose(1,3), m_camPose(2,3) );
+        QVector3D camFwd  ( m_camPose(0,2), m_camPose(1,2), m_camPose(2,2) );
+        QVector3D camUpK  (-m_camPose(0,1),-m_camPose(1,1),-m_camPose(2,1));
+
+        QVector3D eye    ( camOrigin.x(), -camOrigin.y(), camOrigin.z() );
+        QVector3D fwd    (-camFwd.x(),    -camFwd.y(),    camFwd.z() );
+        QVector3D up     (-camUpK.x(),    -camUpK.y(),    camUpK.z() );
+        view.lookAt(eye, eye + fwd, up);
+    } else {
+        QVector3D eye = m_center;
+        float rad = m_distance;
+        float yaw = m_yawDeg * float(M_PI) / 180.0f;
+        float pitch = m_pitchDeg * float(M_PI) / 180.0f;
+        eye += QVector3D(rad * std::cos(pitch) * std::sin(yaw),
+                         rad * std::sin(pitch),
+                         rad * std::cos(pitch) * std::cos(yaw));
+        view.lookAt(eye, m_center, QVector3D(0, 1, 0));
+    }
     QMatrix4x4 mvp = proj * view;
 
     if (m_boundsDirty) uploadBounds();
     if (m_pointsDirty && !m_pointsXyz.isEmpty()) uploadPoints();
     if (m_meshDirty   && !m_meshXyz.isEmpty())   uploadMesh();
     if (m_trajDirty   && !m_trajXyz.isEmpty())   uploadTraj();
-
-    // Kinect/OpenCV camera frame is +Y down; flip Y to render upright.
-    QMatrix4x4 flipY;
-    flipY.scale(1.0f, -1.0f, 1.0f);
 
     // --- Box ---
     {
@@ -298,7 +332,7 @@ void Viewer3D::paintGL() {
         m_progColor.release();
     }
     // --- Camera frustum at estimated pose ---
-    if (m_showCamera && m_camPoseValid && m_camVertexCount > 0) {
+    if (m_showCamera && !m_cameraLocked && m_camPoseValid && m_camVertexCount > 0) {
         m_progColor.bind();
         m_progColor.setUniformValue("uMVP", mvp);
         m_progColor.setUniformValue("uModel", flipY * m_camPose);
@@ -306,6 +340,47 @@ void Viewer3D::paintGL() {
         glDrawArrays(GL_LINES, 0, m_camVertexCount);
         m_vaoCam.release();
         m_progColor.release();
+    }
+
+    // Adaptive point-cap controller: keep frame-time near 1/30 s.
+    // Exponential moving average smooths spikes; geometric step gives fast
+    // response in either direction without oscillating.
+    const double ms = paintTimer.nsecsElapsed() / 1.0e6;
+    m_avgPaintMs = (m_avgPaintMs == 0.0) ? ms : (0.85 * m_avgPaintMs + 0.15 * ms);
+    const int kMinPoints = 50000;
+    const int kMaxPoints = 20000000;
+    if (m_avgPaintMs > kTargetFrameMs * 1.10) {
+        // Too slow: shrink cap by 15% and immediately thin the existing
+        // cloud (keep 1% as a sparse "memory" of what was scanned) so the
+        // next frame benefits.
+        int newCap = int(m_maxPoints * 0.85);
+        if (newCap < kMinPoints) newCap = kMinPoints;
+        if (newCap != m_maxPoints) {
+            m_maxPoints = newCap;
+            int have = m_pointsXyz.size() / 3;
+            if (have > m_maxPoints) {
+                const int keep = qMax(1, have / 100);
+                QVector<float>         keptXyz; keptXyz.reserve(keep * 3);
+                QVector<unsigned char> keptRgb; keptRgb.reserve(keep * 3);
+                for (int i = 0; i < keep; ++i) {
+                    int src = (int)((qint64(i) * have) / keep);
+                    keptXyz.append(m_pointsXyz[3*src + 0]);
+                    keptXyz.append(m_pointsXyz[3*src + 1]);
+                    keptXyz.append(m_pointsXyz[3*src + 2]);
+                    keptRgb.append(m_pointsRgb[3*src + 0]);
+                    keptRgb.append(m_pointsRgb[3*src + 1]);
+                    keptRgb.append(m_pointsRgb[3*src + 2]);
+                }
+                m_pointsXyz = std::move(keptXyz);
+                m_pointsRgb = std::move(keptRgb);
+                m_pointsDirty = true;
+            }
+        }
+    } else if (m_avgPaintMs < kTargetFrameMs * 0.70 && m_maxPoints < kMaxPoints) {
+        // Comfortable headroom: grow cap by 10%.
+        int newCap = int(m_maxPoints * 1.10) + 1;
+        if (newCap > kMaxPoints) newCap = kMaxPoints;
+        m_maxPoints = newCap;
     }
 }
 
@@ -318,13 +393,31 @@ void Viewer3D::setPointCloud(const QVector<float> &xyz,
     // raycast.
     const int n = xyz.size() / 3;
     if (n > 0 && rgb.size() >= n * 3) {
-        const int kMaxPoints = 2000000; // ~24 MB xyz + 6 MB rgb
-        // Drop oldest if we would exceed the cap.
-        int newTotal = (m_pointsXyz.size() / 3) + n;
-        if (newTotal > kMaxPoints) {
-            int drop = newTotal - kMaxPoints;
-            m_pointsXyz.remove(0, drop * 3);
-            m_pointsRgb.remove(0, drop * 3);
+        // If adding the new frame would exceed the adaptive cap, *thin out*
+        // the existing (older) cloud uniformly down to 1% of its size,
+        // instead of dropping the oldest contiguous block. That way the
+        // user still sees the rough shape of everything scanned so far.
+        int have = m_pointsXyz.size() / 3;
+        if (have + n > m_maxPoints) {
+            const int keep = qMax(1, have / 100); // ~1% of old points
+            if (keep < have) {
+                QVector<float>         keptXyz; keptXyz.reserve(keep * 3);
+                QVector<unsigned char> keptRgb; keptRgb.reserve(keep * 3);
+                // Uniform stride keeps a spatially representative subset
+                // (per-frame downsampling at emit time made indices
+                // already shuffled across the scene).
+                for (int i = 0; i < keep; ++i) {
+                    int src = (int)((qint64(i) * have) / keep);
+                    keptXyz.append(m_pointsXyz[3*src + 0]);
+                    keptXyz.append(m_pointsXyz[3*src + 1]);
+                    keptXyz.append(m_pointsXyz[3*src + 2]);
+                    keptRgb.append(m_pointsRgb[3*src + 0]);
+                    keptRgb.append(m_pointsRgb[3*src + 1]);
+                    keptRgb.append(m_pointsRgb[3*src + 2]);
+                }
+                m_pointsXyz = std::move(keptXyz);
+                m_pointsRgb = std::move(keptRgb);
+            }
         }
         m_pointsXyz.reserve(m_pointsXyz.size() + n * 3);
         m_pointsRgb.reserve(m_pointsRgb.size() + n * 3);
@@ -388,11 +481,13 @@ void Viewer3D::clearAccumulated() {
 }
 
 void Viewer3D::mousePressEvent(QMouseEvent *e) {
+    if (m_cameraLocked) return; // arcball disabled in camera-lock mode
     m_lastMouse = e->pos();
     m_dragButton = e->button();
 }
 
 void Viewer3D::mouseMoveEvent(QMouseEvent *e) {
+    if (m_cameraLocked) return;
     QPoint d = e->pos() - m_lastMouse;
     m_lastMouse = e->pos();
     if (m_dragButton == Qt::LeftButton) {
@@ -413,6 +508,7 @@ void Viewer3D::mouseMoveEvent(QMouseEvent *e) {
 }
 
 void Viewer3D::wheelEvent(QWheelEvent *e) {
+    if (m_cameraLocked) return;
     float delta = e->angleDelta().y() / 120.0f;
     m_distance *= std::pow(0.9f, delta);
     if (m_distance < 0.1f) m_distance = 0.1f;

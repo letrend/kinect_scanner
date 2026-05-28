@@ -164,6 +164,19 @@ void MainWindow::buildToolBar() {
     m_actCalibrate = tb->addAction(style->standardIcon(QStyle::SP_ComputerIcon), "Calibrate",
                                    this, &MainWindow::onCalibrate);
 
+    tb->addSeparator();
+    // 3D view mode toggle: Camera Locked (third-person follows the live
+    // Kinect pose) vs. Free (user-controlled arcball).
+    auto *actCamLock = tb->addAction(style->standardIcon(QStyle::SP_DesktopIcon), "Camera Locked");
+    actCamLock->setCheckable(true);
+    actCamLock->setChecked(m_viewer3d->cameraLocked());
+    actCamLock->setToolTip("Camera Locked: 3D view mirrors the Kinect.\n"
+                           "Uncheck for a free-view arcball camera.");
+    connect(actCamLock, &QAction::toggled, this, [this, actCamLock](bool on) {
+        m_viewer3d->setCameraLocked(on);
+        actCamLock->setText(on ? "Camera Locked" : "Free View");
+    });
+
     setRunningState(false);
 }
 
