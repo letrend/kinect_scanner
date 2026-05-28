@@ -33,6 +33,9 @@ public slots:
                  const QVector<unsigned int> &indices);
     /// Set the axis-aligned volume bounding-box size in meters.
     void setVolumeBounds(float xMeters, float yMeters, float zMeters);
+    /// Set the world-space center of the volume bounding-box (meters,
+    /// in Kinect camera coords: +X right, +Y down, +Z forward).
+    void setVolumeCenter(float xMeters, float yMeters, float zMeters);
     /// Reset the user view to look at the volume from the front.
     void resetView();
     /// Clear the accumulated point cloud + trajectory (call on scan reset).
@@ -96,6 +99,7 @@ private:
     bool m_showCamera = true;
 
     QVector3D m_boundsM{4.0f, 4.0f, 4.0f};
+    QVector3D m_volumeCenterM{0.0f, 0.0f, 0.0f};
     bool m_boundsDirty = true;
 
     // Camera (arcball)

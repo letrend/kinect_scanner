@@ -54,6 +54,9 @@ private:
     QSpinBox       *m_yDim = nullptr;
     QSpinBox       *m_zDim = nullptr;
     QDoubleSpinBox *m_voxel = nullptr;
+    QDoubleSpinBox *m_offsetX = nullptr;
+    QDoubleSpinBox *m_offsetY = nullptr;
+    QDoubleSpinBox *m_offsetZ = nullptr;
     // TSDF
     QDoubleSpinBox *m_maxTrunc = nullptr;
     // Bilateral

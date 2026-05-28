@@ -23,6 +23,20 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+namespace {
+// Mirror the near-face clamp applied in VolumeIntegration::intializeGridPosition:
+// the volume's near face is pushed to >= 0.50 m in front of the camera so it
+// stays outside the camera frustum widget.
+void effectiveVolumeCenter(const ScanParameters &p, float &cx, float &cy, float &cz) {
+    const float halfZ = (p.zDim * p.voxelSize) * 0.5f;
+    const float minNearFaceZ = 0.50f;
+    cx = p.gridInitOffsetX;
+    cy = p.gridInitOffsetY;
+    cz = p.gridInitOffsetZ;
+    if (cz - halfZ < minNearFaceZ) cz = halfZ + minNearFaceZ;
+}
+} // namespace
+
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     qRegisterMetaType<ScanParameters>("ScanParameters");
     qRegisterMetaType<QVector<float>>("QVector<float>");
@@ -134,6 +148,8 @@ void MainWindow::buildUi() {
     m_viewer3d->setVolumeBounds(p.xDim * p.voxelSize,
                                 p.yDim * p.voxelSize,
                                 p.zDim * p.voxelSize);
+    float cx, cy, cz; effectiveVolumeCenter(p, cx, cy, cz);
+    m_viewer3d->setVolumeCenter(cx, cy, cz);
 }
 
 void MainWindow::buildToolBar() {
@@ -263,6 +279,10 @@ void MainWindow::onWorkerInitialized(ScanParameters effectiveParams) {
     m_viewer3d->setVolumeBounds(effectiveParams.xDim * effectiveParams.voxelSize,
                                 effectiveParams.yDim * effectiveParams.voxelSize,
                                 effectiveParams.zDim * effectiveParams.voxelSize);
+    {
+        float cx, cy, cz; effectiveVolumeCenter(effectiveParams, cx, cy, cz);
+        m_viewer3d->setVolumeCenter(cx, cy, cz);
+    }
     // Auto-start scanning so debugging cycles don't require clicking Start.
     QMetaObject::invokeMethod(m_worker, "start", Qt::QueuedConnection);
 }
@@ -288,6 +308,10 @@ void MainWindow::onParametersChanged(ScanParameters p, bool requiresReset) {
     m_viewer3d->setVolumeBounds(p.xDim * p.voxelSize,
                                 p.yDim * p.voxelSize,
                                 p.zDim * p.voxelSize);
+    {
+        float cx, cy, cz; effectiveVolumeCenter(p, cx, cy, cz);
+        m_viewer3d->setVolumeCenter(cx, cy, cz);
+    }
     if (requiresReset)
         onStatus("Volume/ICP parameter changed - press Reset to apply.");
 }

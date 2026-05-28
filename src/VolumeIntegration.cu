@@ -270,127 +270,29 @@ bool VolumeIntegration::intializeGridPosition(){
         }
     }
 
-    // calculate centroid for grid position
-    float3 *voxels = new float3[pWidth * pHeight];
-    convert_mat_to_layered(imgDepth, depth1 / 1000.0f);
-    cudaMemcpy(d_depth, imgDepth, bytesFloat, cudaMemcpyHostToDevice);
-    CUDA_CHECK;
-    deviceCalculateLocalCoordinates<<<grid, block>>>(d_depth, d_v, pWidth, pHeight);
-    CUDA_CHECK;
-    cudaMemcpy(voxels, d_v, bytesFloat3, cudaMemcpyDeviceToHost);
-    CUDA_CHECK;
-    calculateVoxelGridPosition(voxels, imgDepth, pWidth * pHeight, vWidth,
-                               vHeight, slices, voxelSize, gridLocation);
-    delete[] voxels;
+    // Place the voxel grid so its center sits at the user-configured
+    // offset from the camera's initial pose (camera frame: +X right,
+    // +Y down, +Z forward). No depth-based object detection.
+    //
+    // Push the volume forward if necessary so that the near face sits in
+    // front of the camera frustum (Kinect v2 near-clip ~0.30 m, plus the
+    // ~0.20 m frustum widget drawn in the 3D viewer => 0.50 m clearance).
+    ScanParameters sp = getParameters();
+    const float halfX = (vWidth  * voxelSize) / 2.0f;
+    const float halfY = (vHeight * voxelSize) / 2.0f;
+    const float halfZ = (slices  * voxelSize) / 2.0f;
+    const float minNearFaceZ = 0.50f;        // metres in front of camera
+    float centerZ = sp.gridInitOffsetZ;
+    if (centerZ - halfZ < minNearFaceZ) {
+        centerZ = halfZ + minNearFaceZ;
+    }
+    gridLocation[0] = sp.gridInitOffsetX - halfX;
+    gridLocation[1] = sp.gridInitOffsetY - halfY;
+    gridLocation[2] = centerZ            - halfZ;
 
     cudaMemcpyToSymbol(c_gridLocation, gridLocation, 3 * sizeof(float));
     CUDA_CHECK;
     return true;
-}
-
-void VolumeIntegration::calculateVoxelGridPosition(float3 *voxels, float* depth, size_t n, float vWidth,
-                                float vHeight, float slices, float voxelSize, float *gridLocation)
-{
-    // Heuristic object-of-interest detection:
-    //
-    //   1. Restrict to the central image region (the user typically frames
-    //      the object near the centre of the field of view; ignoring the
-    //      borders rejects walls/floor/ceiling which would otherwise
-    //      dominate a naive centroid).
-    //   2. Build a depth histogram from those pixels.
-    //   3. Pick the *closest* dominant peak (smallest z with count above a
-    //      fraction of the max histogram bin). This selects an object the
-    //      user is pointing the camera at over a more distant background
-    //      surface.
-    //   4. Take the centroid of all central-region points whose depth is
-    //      within a window around that peak; centre the voxel grid on it.
-    //
-    // Falls back to a simple <1.5 m centroid (the previous behaviour) if no
-    // good peak is found.
-
-    const size_t W = pWidth, H = pHeight;
-    // Central 60 % of the image.
-    const size_t x0 = W * 2 / 10, x1 = W * 8 / 10;
-    const size_t y0 = H * 2 / 10, y1 = H * 8 / 10;
-
-    const float zMin = 0.30f;   // metres, near-clip of Kinect v2
-    const float zMax = 4.00f;
-    const float binW = 0.05f;
-    const int nBins = (int)std::ceil((zMax - zMin) / binW);
-    std::vector<int> hist(nBins, 0);
-
-    for (size_t y = y0; y < y1; ++y) {
-        for (size_t x = x0; x < x1; ++x) {
-            float z = depth[x + W * y];
-            if (z <= zMin || z >= zMax) continue;
-            int b = (int)((z - zMin) / binW);
-            if (b >= 0 && b < nBins) ++hist[b];
-        }
-    }
-
-    int maxCount = 0;
-    for (int b = 0; b < nBins; ++b) if (hist[b] > maxCount) maxCount = hist[b];
-
-    int peakBin = -1;
-    if (maxCount > 200) {
-        const int floor = std::max(50, maxCount / 3);
-        // Closest bin (smallest depth) that crosses the floor.
-        for (int b = 0; b < nBins; ++b) {
-            if (hist[b] >= floor) { peakBin = b; break; }
-        }
-    }
-
-    double3 centroid{0.0, 0.0, 0.0};
-    int count = 0;
-
-    if (peakBin >= 0) {
-        const float peakZ  = zMin + (peakBin + 0.5f) * binW;
-        const float window = 0.30f;  // ±30 cm around the peak
-        const float zLo = peakZ - window;
-        const float zHi = peakZ + window;
-        for (size_t y = y0; y < y1; ++y) {
-            for (size_t x = x0; x < x1; ++x) {
-                size_t i = x + W * y;
-                float z = depth[i];
-                if (z <= zLo || z >= zHi) continue;
-                centroid.x += voxels[i].x;
-                centroid.y += voxels[i].y;
-                centroid.z += voxels[i].z;
-                ++count;
-            }
-        }
-    }
-
-    // Fallback: previous behaviour (all valid pixels <1.5 m, whole image).
-    if (count < 100) {
-        centroid = {0.0, 0.0, 0.0};
-        count = 0;
-        for(size_t i = 0; i < n; i++) {
-            if(depth[i] == 0.0f) continue;
-            if(depth[i] < 1.5f){
-                centroid.x += voxels[i].x;
-                centroid.y += voxels[i].y;
-                centroid.z += voxels[i].z;
-                ++count;
-            }
-        }
-    }
-
-    if (count <= 0) {
-        // Last-resort: keep grid at origin.
-        gridLocation[0] = -(vWidth * voxelSize) / 2.0f;
-        gridLocation[1] = -(vHeight * voxelSize) / 2.0f;
-        gridLocation[2] = -(slices * voxelSize) / 2.0f;
-        return;
-    }
-
-    centroid.x /= count;
-    centroid.y /= count;
-    centroid.z /= count;
-
-    gridLocation[0] = centroid.x - (vWidth * voxelSize) / 2.0f;
-    gridLocation[1] = centroid.y - (vHeight * voxelSize) / 2.0f;
-    gridLocation[2] = centroid.z - (slices * voxelSize) / 2.0f;
 }
 
 __global__ void deviceCalculateLocalCoordinates(float *d_depth, float3 *d_v, size_t pWidth, size_t pHeight)

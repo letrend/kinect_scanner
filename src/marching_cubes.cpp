@@ -1,5 +1,11 @@
 #include "marching_cubes.hpp"
 
+#include <cstdio>
+#include <cstdint>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 MarchingCubes::MarchingCubes(const Vec3i &dimensions, const Vec3 &size) :
     m_dim(dimensions),
     m_size(size),
@@ -315,178 +321,108 @@ bool MarchingCubes::computeIsoSurface(const float* tsdf, const unsigned char* re
     m_colors.clear();
     m_faces.clear();
 
-    Vec3 edgePoints[12];
-    Vec3b edgeColors[12];
-    int edgeIndices[12][6];
+    // Each OpenMP thread accumulates into its own private buffers; we
+    // concatenate at the end with per-thread vertex-index offsets so that
+    // faces correctly reference the merged vertex array. This avoids any
+    // contention on m_vertices/m_faces during the inner loops.
+    const int zMax = m_dim[2] - 2;
+    const int yMax = m_dim[1] - 2;
+    const int xMax = m_dim[0] - 2;
 
-    for (int z = 0; z < m_dim[2]-2; z++)
+#ifdef _OPENMP
+    const int nThreads = std::max(1, omp_get_max_threads());
+#else
+    const int nThreads = 1;
+#endif
+    std::vector<std::vector<Vec3>>  tVerts(nThreads);
+    std::vector<std::vector<Vec3b>> tColors(nThreads);
+    std::vector<std::vector<Vec3i>> tFaces(nThreads);
+
+    #pragma omp parallel
     {
-        for (int y = 0; y < m_dim[1]-2; y++)
+#ifdef _OPENMP
+        const int tid = omp_get_thread_num();
+#else
+        const int tid = 0;
+#endif
+        std::vector<Vec3>  &outVerts  = tVerts[tid];
+        std::vector<Vec3b> &outColors = tColors[tid];
+        std::vector<Vec3i> &outFaces  = tFaces[tid];
+
+        Vec3  edgePoints[12];
+        Vec3b edgeColors[12];
+
+        #pragma omp for schedule(dynamic, 4) nowait
+        for (int z = 0; z < zMax; z++)
         {
-            for (int x = 0; x < m_dim[0]-2; x++)
+            for (int y = 0; y < yMax; y++)
             {
-                int cubeindex = computeLutIndex(x, y, z, isoValue);
-                if (cubeindex != 0 && cubeindex != 255)
+                for (int x = 0; x < xMax; x++)
                 {
+                    int cubeindex = computeLutIndex(x, y, z, isoValue);
+                    if (cubeindex == 0 || cubeindex == 255)
+                        continue;
+
                     if (edgeTable[cubeindex] & 1)
-                    {
-                        // interpolate between vertices 0 and 1
-                        edgePoints[0] = getVertex(x + 1, y + 1, z, x + 1, y, z, isoValue);
-                        edgeIndices[0][0] = x + 1;
-                        edgeIndices[0][1] = y + 1;
-                        edgeIndices[0][2] = z;
-                        edgeIndices[0][3] = x + 1;
-                        edgeIndices[0][4] = y;
-                        edgeIndices[0][5] = z;
+                        edgePoints[0] = getVertex(x + 1, y + 1, z, x + 1, y, z, isoValue),
                         edgeColors[0] = getColor(x + 1, y + 1, z, x + 1, y, z, isoValue);
-                    }
-
                     if (edgeTable[cubeindex] & 2)
-                    {
-                        // interpolate between vertices 1 and 2
-                        edgePoints[1] = getVertex(x + 1, y, z, x, y, z, isoValue);
-                        edgeIndices[1][0] = x + 1;
-                        edgeIndices[1][1] = y;
-                        edgeIndices[1][2] = z;
-                        edgeIndices[1][3] = x;
-                        edgeIndices[1][4] = y;
-                        edgeIndices[1][5] = z;
+                        edgePoints[1] = getVertex(x + 1, y, z, x, y, z, isoValue),
                         edgeColors[1] = getColor(x + 1, y, z, x, y, z, isoValue);
-                    }
-
                     if (edgeTable[cubeindex] & 4)
-                    {
-                        // interpolate between vertices 2 and 3
-                        edgePoints[2] = getVertex(x, y, z, x, y + 1, z, isoValue);
-                        edgeIndices[2][0] = x;
-                        edgeIndices[2][1] = y;
-                        edgeIndices[2][2] = z;
-                        edgeIndices[2][3] = x;
-                        edgeIndices[2][4] = y + 1;
-                        edgeIndices[2][5] = z;
+                        edgePoints[2] = getVertex(x, y, z, x, y + 1, z, isoValue),
                         edgeColors[2] = getColor(x, y + 1, z, x, y, z, isoValue);
-                    }
-
                     if (edgeTable[cubeindex] & 8)
-                    {
-                        // interpolate between vertices 3 and 0
-                        edgePoints[3] = getVertex(x, y + 1, z, x + 1, y + 1, z, isoValue);
-                        edgeIndices[3][0] = x;
-                        edgeIndices[3][1] = y + 1;
-                        edgeIndices[3][2] = z;
-                        edgeIndices[3][3] = x + 1;
-                        edgeIndices[3][4] = y + 1;
-                        edgeIndices[3][5] = z;
+                        edgePoints[3] = getVertex(x, y + 1, z, x + 1, y + 1, z, isoValue),
                         edgeColors[3] = getColor(x + 1, y + 1, z, x, y + 1, z, isoValue);
-                    }
-
                     if (edgeTable[cubeindex] & 16)
-                    {
-                        // interpolate between vertices 4 and 5
-                        edgePoints[4] = getVertex(x + 1, y + 1, z + 1, x + 1, y, z + 1, isoValue);
-                        edgeIndices[4][0] = x + 1;
-                        edgeIndices[4][1] = y + 1;
-                        edgeIndices[4][2] = z + 1;
-                        edgeIndices[4][3] = x + 1;
-                        edgeIndices[4][4] = y;
-                        edgeIndices[4][5] = z + 1;
+                        edgePoints[4] = getVertex(x + 1, y + 1, z + 1, x + 1, y, z + 1, isoValue),
                         edgeColors[4] = getColor(x + 1, y + 1, z + 1, x + 1, y, z + 1, isoValue);
-                    }
-
                     if (edgeTable[cubeindex] & 32)
-                    {
-                        // interpolate between vertices 5 and 6
-                        edgePoints[5] = getVertex(x + 1, y, z + 1, x, y, z + 1, isoValue);
-                        edgeIndices[5][0] = x + 1;
-                        edgeIndices[5][1] = y;
-                        edgeIndices[5][2] = z + 1;
-                        edgeIndices[5][3] = x;
-                        edgeIndices[5][4] = y;
-                        edgeIndices[5][5] = z + 1;
+                        edgePoints[5] = getVertex(x + 1, y, z + 1, x, y, z + 1, isoValue),
                         edgeColors[5] = getColor(x + 1, y, z + 1, x, y, z + 1, isoValue);
-                    }
-
                     if (edgeTable[cubeindex] & 64)
-                    {
-                        // interpolate between vertices 6 and 7
-                        edgePoints[6] = getVertex(x, y, z + 1, x, y + 1, z + 1, isoValue);
-                        edgeIndices[6][0] = x;
-                        edgeIndices[6][1] = y;
-                        edgeIndices[6][2] = z + 1;
-                        edgeIndices[6][3] = x;
-                        edgeIndices[6][4] = y + 1;
-                        edgeIndices[6][5] = z + 1;
+                        edgePoints[6] = getVertex(x, y, z + 1, x, y + 1, z + 1, isoValue),
                         edgeColors[6] = getColor(x, y + 1, z + 1, x, y, z + 1, isoValue);
-                    }
-
                     if (edgeTable[cubeindex] & 128)
-                    {
-                        // interpolate between vertices 7 and 4
-                        edgePoints[7] = getVertex(x, y + 1, z + 1, x + 1, y + 1, z + 1, isoValue);
-                        edgeIndices[7][0] = x;
-                        edgeIndices[7][1] = y + 1;
-                        edgeIndices[7][2] = z + 1;
-                        edgeIndices[7][3] = x + 1;
-                        edgeIndices[7][4] = y + 1;
-                        edgeIndices[7][5] = z + 1;
+                        edgePoints[7] = getVertex(x, y + 1, z + 1, x + 1, y + 1, z + 1, isoValue),
                         edgeColors[7] = getColor(x + 1, y + 1, z + 1, x, y + 1, z + 1, isoValue);
-                    }
-
                     if (edgeTable[cubeindex] & 256)
-                    {
-                        // interpolate between vertices 0 and 4
-                        edgePoints[8] = getVertex(x + 1, y + 1, z, x + 1, y + 1, z + 1, isoValue);
-                        edgeIndices[8][0] = x + 1;
-                        edgeIndices[8][1] = y + 1;
-                        edgeIndices[8][2] = z;
-                        edgeIndices[8][3] = x + 1;
-                        edgeIndices[8][4] = y + 1;
-                        edgeIndices[8][5] = z + 1;
+                        edgePoints[8] = getVertex(x + 1, y + 1, z, x + 1, y + 1, z + 1, isoValue),
                         edgeColors[8] = getColor(x + 1, y + 1, z, x + 1, y + 1, z + 1, isoValue);
-                    }
-
                     if (edgeTable[cubeindex] & 512)
-                    {
-                        // interpolate between vertices 1 and 5
-                        edgePoints[9] = getVertex(x + 1, y, z, x + 1, y, z + 1, isoValue);
-                        edgeIndices[9][0] = x + 1;
-                        edgeIndices[9][1] = y;
-                        edgeIndices[9][2] = z;
-                        edgeIndices[9][3] = x + 1;
-                        edgeIndices[9][4] = y;
-                        edgeIndices[9][5] = z + 1;
+                        edgePoints[9] = getVertex(x + 1, y, z, x + 1, y, z + 1, isoValue),
                         edgeColors[9] = getColor(x + 1, y, z, x + 1, y, z + 1, isoValue);
-                    }
-
                     if (edgeTable[cubeindex] & 1024)
-                    {
-                        // interpolate between vertices 2 and 6
-                        edgePoints[10] = getVertex(x, y, z, x, y, z + 1, isoValue);
-                        edgeIndices[10][0] = x;
-                        edgeIndices[10][1] = y;
-                        edgeIndices[10][2] = z;
-                        edgeIndices[10][3] = x;
-                        edgeIndices[10][4] = y;
-                        edgeIndices[10][5] = z + 1;
+                        edgePoints[10] = getVertex(x, y, z, x, y, z + 1, isoValue),
                         edgeColors[10] = getColor(x, y, z, x, y, z + 1, isoValue);
-                    }
-
                     if (edgeTable[cubeindex] & 2048)
-                    {
-                        // interpolate between vertices 3 and 7
-                        edgePoints[11] = getVertex(x, y + 1, z, x, y + 1, z + 1, isoValue);
-                        edgeIndices[11][0] = x;
-                        edgeIndices[11][1] = y + 1;
-                        edgeIndices[11][2] = z;
-                        edgeIndices[11][3] = x;
-                        edgeIndices[11][4] = y + 1;
-                        edgeIndices[11][5] = z + 1;
+                        edgePoints[11] = getVertex(x, y + 1, z, x, y + 1, z + 1, isoValue),
                         edgeColors[11] = getColor(x, y + 1, z, x, y + 1, z + 1, isoValue);
-                    }
 
-                    computeTriangles(cubeindex, edgePoints, edgeColors);
+                    computeTriangles(cubeindex, edgePoints, edgeColors,
+                                     outVerts, outColors, outFaces);
                 }
             }
+        }
+    } // omp parallel
+
+    // Merge: copy each thread's vertices/colors and offset its face indices.
+    size_t totalV = 0, totalF = 0;
+    for (int t = 0; t < nThreads; ++t) { totalV += tVerts[t].size(); totalF += tFaces[t].size(); }
+    m_vertices.reserve(totalV);
+    m_colors.reserve(totalV);
+    m_faces.reserve(totalF);
+
+    for (int t = 0; t < nThreads; ++t) {
+        const unsigned int base = (unsigned int)m_vertices.size();
+        m_vertices.insert(m_vertices.end(), tVerts[t].begin(),  tVerts[t].end());
+        m_colors  .insert(m_colors  .end(), tColors[t].begin(), tColors[t].end());
+        if (base == 0) {
+            m_faces.insert(m_faces.end(), tFaces[t].begin(), tFaces[t].end());
+        } else {
+            for (const Vec3i &f : tFaces[t])
+                m_faces.emplace_back(f[0] + (int)base, f[1] + (int)base, f[2] + (int)base);
         }
     }
 
@@ -574,7 +510,10 @@ Vec3b MarchingCubes::getColor(int x1, int y1, int z1, int x2, int y2, int z2, fl
 }
 
 
-void MarchingCubes::computeTriangles(int cubeIndex, const Vec3 edgePoints[12], const Vec3b edgeColors[12])
+void MarchingCubes::computeTriangles(int cubeIndex, const Vec3 edgePoints[12], const Vec3b edgeColors[12],
+                                     std::vector<Vec3> &outVerts,
+                                     std::vector<Vec3b> &outColors,
+                                     std::vector<Vec3i> &outFaces)
 {
     std::vector<Vec3> pts;
     pts.resize(3);
@@ -594,23 +533,24 @@ void MarchingCubes::computeTriangles(int cubeIndex, const Vec3 edgePoints[12], c
             for (int t = 0; t < 3; ++t)
             {
                 Vec3b c = edgeColors[triTable[cubeIndex][i + t]];
-                vIdx[t] = addVertex(pts[t], c);
+                vIdx[t] = addVertex(pts[t], c, outVerts, outColors);
             }
 
             // add face
             Vec3i faceVerts(vIdx[0], vIdx[1], vIdx[2]);
-            m_faces.push_back(faceVerts);
+            outFaces.push_back(faceVerts);
         }
     }
 }
 
 
-inline unsigned int MarchingCubes::addVertex(const Vec3 &v, const Vec3b &c)
+inline unsigned int MarchingCubes::addVertex(const Vec3 &v, const Vec3b &c,
+                                             std::vector<Vec3> &outVerts,
+                                             std::vector<Vec3b> &outColors)
 {
-    // add vertex
-    unsigned int vIdx = m_vertices.size();
-    m_vertices.push_back(v);
-    m_colors.push_back(c);
+    unsigned int vIdx = (unsigned int)outVerts.size();
+    outVerts.push_back(v);
+    outColors.push_back(c);
     return vIdx;
 }
 
@@ -627,39 +567,71 @@ bool MarchingCubes::savePly(const std::string &filename) const
     if (m_vertices.empty())
         return false;
 
-    std::ofstream plyFile;
-    plyFile.open(filename.c_str());
-    if (!plyFile.is_open())
+    // Binary little-endian PLY: dramatically faster to write than ASCII
+    // (no per-number formatting, no std::endl flush per line) and produces
+    // a much smaller file. No precision is lost vs. the previous ASCII
+    // writer because PLY's "float" is 32-bit IEEE-754, which is what the
+    // previous code emitted as a decimal string from a double anyway.
+
+    FILE *fp = std::fopen(filename.c_str(), "wb");
+    if (!fp)
         return false;
 
-    plyFile << "ply" << std::endl;
-    plyFile << "format ascii 1.0" << std::endl;
-    plyFile << "element vertex " << m_vertices.size() << std::endl;
-    plyFile << "property float x" << std::endl;
-    plyFile << "property float y" << std::endl;
-    plyFile << "property float z" << std::endl;
-    plyFile << "property uchar red" << std::endl;
-    plyFile << "property uchar green" << std::endl;
-    plyFile << "property uchar blue" << std::endl;
-    plyFile << "element face " << (int)m_faces.size() << std::endl;
-    plyFile << "property list uchar int vertex_indices" << std::endl;
-    plyFile << "end_header" << std::endl;
+    // Larger I/O buffer for fewer write() syscalls.
+    static char io_buf[1 << 20];
+    std::setvbuf(fp, io_buf, _IOFBF, sizeof(io_buf));
 
-    // write vertices
-    for (size_t i = 0; i < m_vertices.size(); i++)
+    std::fprintf(fp,
+        "ply\n"
+        "format binary_little_endian 1.0\n"
+        "element vertex %zu\n"
+        "property float x\n"
+        "property float y\n"
+        "property float z\n"
+        "property uchar red\n"
+        "property uchar green\n"
+        "property uchar blue\n"
+        "element face %zu\n"
+        "property list uchar int vertex_indices\n"
+        "end_header\n",
+        m_vertices.size(), m_faces.size());
+
+    // Pack each vertex as 12 bytes xyz (float32) + 3 bytes rgb.
+    #pragma pack(push, 1)
+    struct VertexRec { float x, y, z; unsigned char r, g, b; };
+    #pragma pack(pop)
+    static_assert(sizeof(VertexRec) == 15, "PLY vertex record must be 15 bytes");
+
     {
-        plyFile << m_vertices[i][0] << " " << m_vertices[i][1] << " " << m_vertices[i][2];
-        plyFile << " " << (int)m_colors[i][0] << " " << (int)m_colors[i][1] << " " << (int)m_colors[i][2];
-        plyFile << std::endl;
+        std::vector<VertexRec> buf(m_vertices.size());
+        for (size_t i = 0; i < m_vertices.size(); ++i) {
+            buf[i].x = static_cast<float>(m_vertices[i][0]);
+            buf[i].y = static_cast<float>(m_vertices[i][1]);
+            buf[i].z = static_cast<float>(m_vertices[i][2]);
+            buf[i].r = m_colors[i][0];
+            buf[i].g = m_colors[i][1];
+            buf[i].b = m_colors[i][2];
+        }
+        std::fwrite(buf.data(), sizeof(VertexRec), buf.size(), fp);
     }
 
-    // write faces
-    for (size_t i = 0; i < m_faces.size(); i++)
+    // Pack each face as 1 byte count + 3 * int32 indices.
+    #pragma pack(push, 1)
+    struct FaceRec { unsigned char n; int32_t a, b, c; };
+    #pragma pack(pop)
+    static_assert(sizeof(FaceRec) == 13, "PLY face record must be 13 bytes");
+
     {
-        plyFile << "3 " << (int)m_faces[i][0] << " " << (int)m_faces[i][1] << " " << (int)m_faces[i][2] << std::endl;
+        std::vector<FaceRec> buf(m_faces.size());
+        for (size_t i = 0; i < m_faces.size(); ++i) {
+            buf[i].n = 3;
+            buf[i].a = static_cast<int32_t>(m_faces[i][0]);
+            buf[i].b = static_cast<int32_t>(m_faces[i][1]);
+            buf[i].c = static_cast<int32_t>(m_faces[i][2]);
+        }
+        std::fwrite(buf.data(), sizeof(FaceRec), buf.size(), fp);
     }
 
-    plyFile.close();
-
+    std::fclose(fp);
     return true;
 }

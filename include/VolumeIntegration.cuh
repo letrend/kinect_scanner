@@ -149,8 +149,6 @@ public:
     MyFreenectDevice* kinect() { return device; }
 
 private:
-    void calculateVoxelGridPosition(float3 *voxels, float* depth, size_t n, float vWidth,
-                                    float vHeight, float slices, float voxelSize, float *gridLocation);
     void domainKernel(float *kernel, int cols, int rows, float sigma_d);
 
     // opencv helpers

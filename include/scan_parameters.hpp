@@ -12,7 +12,17 @@ struct ScanParameters {
     unsigned int xDim      = 400;
     unsigned int yDim      = 400;
     unsigned int zDim      = 400;
-    float        voxelSize = 0.01f;   // meters
+    // Default to ~2 mm: roughly the depth-noise floor of the Kinect v2 at
+    // typical scan distance (0.5-1.5 m). Smaller voxels just add memory
+    // pressure without resolving more real geometry.
+    float        voxelSize = 0.002f;  // meters
+
+    // ---- Initial volume position (offset of volume center from the
+    //      camera's initial pose, in camera coordinates: +X right,
+    //      +Y down, +Z forward). Applied at the next grid init. ----
+    float gridInitOffsetX = 0.0f;
+    float gridInitOffsetY = 0.0f;
+    float gridInitOffsetZ = 1.0f;     // 1 m in front of the camera
 
     // ---- TSDF ----
     float maxTruncation = 0.03f;      // meters

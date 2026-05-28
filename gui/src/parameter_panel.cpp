@@ -36,16 +36,32 @@ QGroupBox *ParameterPanel::buildVolumeGroup() {
     m_voxel = new QDoubleSpinBox; m_voxel->setRange(0.001, 0.5);
     m_voxel->setSingleStep(0.001); m_voxel->setDecimals(4); m_voxel->setSuffix(" m");
 
+    auto makeOffset = [] {
+        auto *w = new QDoubleSpinBox;
+        w->setRange(-5.0, 5.0); w->setSingleStep(0.05);
+        w->setDecimals(2); w->setSuffix(" m");
+        return w;
+    };
+    m_offsetX = makeOffset();
+    m_offsetY = makeOffset();
+    m_offsetZ = makeOffset();
+
     f->addRow("xDim", m_xDim);
     f->addRow("yDim", m_yDim);
     f->addRow("zDim", m_zDim);
     f->addRow("Voxel size", m_voxel);
+    f->addRow("Init offset X (right)",  m_offsetX);
+    f->addRow("Init offset Y (down)",   m_offsetY);
+    f->addRow("Init offset Z (forward)", m_offsetZ);
 
     auto vol = [this]{ onVolumeChanged(); };
     connect(m_xDim,  QOverload<int>::of(&QSpinBox::valueChanged),         this, vol);
     connect(m_yDim,  QOverload<int>::of(&QSpinBox::valueChanged),         this, vol);
     connect(m_zDim,  QOverload<int>::of(&QSpinBox::valueChanged),         this, vol);
     connect(m_voxel, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, vol);
+    connect(m_offsetX, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, vol);
+    connect(m_offsetY, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, vol);
+    connect(m_offsetZ, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, vol);
     return g;
 }
 
@@ -143,6 +159,9 @@ void ParameterPanel::setParameters(const ScanParameters &p) {
     m_yDim->setValue((int)p.yDim);
     m_zDim->setValue((int)p.zDim);
     m_voxel->setValue(p.voxelSize);
+    m_offsetX->setValue(p.gridInitOffsetX);
+    m_offsetY->setValue(p.gridInitOffsetY);
+    m_offsetZ->setValue(p.gridInitOffsetZ);
     m_maxTrunc->setValue(p.maxTruncation);
     m_sigmaD->setValue(p.sigma_d);
     m_sigmaR->setValue(p.sigma_r);
@@ -164,6 +183,9 @@ void ParameterPanel::setVolumeEditable(bool editable) {
     m_yDim->setEnabled(editable);
     m_zDim->setEnabled(editable);
     m_voxel->setEnabled(editable);
+    m_offsetX->setEnabled(editable);
+    m_offsetY->setEnabled(editable);
+    m_offsetZ->setEnabled(editable);
     m_sigmaD->setEnabled(editable);
     m_icp0->setEnabled(editable);
     m_icp1->setEnabled(editable);
@@ -188,6 +210,9 @@ void ParameterPanel::flush() {
     m_current.yDim      = (unsigned)m_yDim->value();
     m_current.zDim      = (unsigned)m_zDim->value();
     m_current.voxelSize = (float)m_voxel->value();
+    m_current.gridInitOffsetX = (float)m_offsetX->value();
+    m_current.gridInitOffsetY = (float)m_offsetY->value();
+    m_current.gridInitOffsetZ = (float)m_offsetZ->value();
     m_current.maxTruncation  = (float)m_maxTrunc->value();
     m_current.sigma_d        = (float)m_sigmaD->value();
     m_current.sigma_r        = (float)m_sigmaR->value();

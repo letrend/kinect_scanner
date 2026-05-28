@@ -243,6 +243,14 @@ void Viewer3D::paintGL() {
         const float kinectVFovDeg = 60.4f;
         const float kinectAspect  = 512.0f / 424.0f;
         proj.perspective(kinectVFovDeg, kinectAspect, 0.05f, 100.0f);
+        // World is Kinect (X right, Y down, Z forward) with model=flipY,
+        // giving a left-handed (X right, Y up, Z forward) frame. GL's
+        // lookAt is right-handed, so without correction the world appears
+        // X-mirrored (looking left makes points slide right relative to
+        // expectation). Pre-mirror the projection's X axis to convert
+        // back to a right-handed image. Face culling is disabled, so
+        // winding flip has no visual effect.
+        proj = QMatrix4x4(-1,0,0,0,  0,1,0,0,  0,0,1,0,  0,0,0,1) * proj;
     } else {
         proj.perspective(45.0f, width() / float(qMax(1, height())), 0.05f, 100.0f);
     }
@@ -270,8 +278,8 @@ void Viewer3D::paintGL() {
         QVector3D camUpK  (-m_camPose(0,1),-m_camPose(1,1),-m_camPose(2,1));
 
         QVector3D eye    ( camOrigin.x(), -camOrigin.y(), camOrigin.z() );
-        QVector3D fwd    (-camFwd.x(),    -camFwd.y(),    camFwd.z() );
-        QVector3D up     (-camUpK.x(),    -camUpK.y(),    camUpK.z() );
+        QVector3D fwd    ( camFwd.x(),    -camFwd.y(),    camFwd.z() );
+        QVector3D up     ( camUpK.x(),    -camUpK.y(),    camUpK.z() );
         view.lookAt(eye, eye + fwd, up);
     } else {
         QVector3D eye = m_center;
@@ -292,9 +300,11 @@ void Viewer3D::paintGL() {
 
     // --- Box ---
     {
+        QMatrix4x4 boxModel = flipY;
+        boxModel.translate(m_volumeCenterM);
         m_progColor.bind();
         m_progColor.setUniformValue("uMVP", mvp);
-        m_progColor.setUniformValue("uModel", flipY);
+        m_progColor.setUniformValue("uModel", boxModel);
         m_vaoBox.bind();
         glDrawArrays(GL_LINES, 0, 24);
         m_vaoBox.release();
@@ -459,6 +469,11 @@ void Viewer3D::setMesh(const QVector<float> &vertices,
 void Viewer3D::setVolumeBounds(float x, float y, float z) {
     m_boundsM = QVector3D(x, y, z);
     m_boundsDirty = true;
+    update();
+}
+
+void Viewer3D::setVolumeCenter(float x, float y, float z) {
+    m_volumeCenterM = QVector3D(x, y, z);
     update();
 }
 

@@ -6,6 +6,12 @@ add_definitions(-DEIGEN_DONT_ALIGN_STATICALLY)
 
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -O3 ")
 
+# OpenMP for CPU-side parallelism (marching cubes, etc.)
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+endif()
+
 # RelWithDebInfo, Release or Debug
 SET(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
 
@@ -125,4 +131,7 @@ if(BUILD_GUI)
 endif()
 
 TARGET_LINK_LIBRARIES(3D-kinect-scanner ${freenect2_LIBRARIES} ${OpenCV_LIBS} ${CURSES_LIBRARIES} -lboost_system -lpthread)
+if(OpenMP_CXX_FOUND)
+    TARGET_LINK_LIBRARIES(3D-kinect-scanner OpenMP::OpenMP_CXX)
+endif()
 

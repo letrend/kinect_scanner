@@ -31,9 +31,14 @@ protected:
     Vec3b getColor(int x1, int y1, int z1, int x2, int y2, int z2, float isoValue);
 
     void computeTriangles(int cubeIndex,
-                            const Vec3 edgePoints[12], const Vec3b edgeColors[12]);
+                            const Vec3 edgePoints[12], const Vec3b edgeColors[12],
+                            std::vector<Vec3> &outVerts,
+                            std::vector<Vec3b> &outColors,
+                            std::vector<Vec3i> &outFaces);
 
-    inline unsigned int addVertex(const Vec3 &v, const Vec3b &c);
+    inline unsigned int addVertex(const Vec3 &v, const Vec3b &c,
+                                  std::vector<Vec3> &outVerts,
+                                  std::vector<Vec3b> &outColors);
 
     Vec3 voxelToWorld(int i, int j, int k) const;
 
