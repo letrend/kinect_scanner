@@ -8,6 +8,8 @@
 #include <QTimer>
 #include <QtMath>
 
+#include <cuda_runtime.h>
+
 namespace {
 
 /// Convert a CV_32FC3 BGR float image in [0,1] to a QImage (RGB888).
@@ -71,6 +73,36 @@ ScanParameters ScannerWorker::currentParameters() const {
 void ScannerWorker::initialize(ScanParameters params) {
     try {
         params.useDisplay = false;
+
+        // Auto-size the voxel grid to fill ~70% of free GPU memory, but
+        // only on the very first init. After that we keep whatever dims
+        // the user (or the previous auto-size) chose so Reset doesn't
+        // surprise the user by silently shrinking the volume because the
+        // pipeline now occupies more GPU memory than it did at startup.
+        if (!m_scanner) {
+            size_t freeBytes = 0, totalBytes = 0;
+            if (cudaMemGetInfo(&freeBytes, &totalBytes) == cudaSuccess && freeBytes > 0) {
+                const double budget   = double(freeBytes) * 0.70;
+                const double perVoxel = 3.0 * sizeof(float) + 3.0 * sizeof(unsigned char);
+                double n = std::cbrt(budget / perVoxel);
+                unsigned int dim = (unsigned int)std::floor(n / 16.0) * 16;
+                if (dim < 64)   dim = 64;
+                if (dim > 1024) dim = 1024;
+                params.xDim = params.yDim = params.zDim = dim;
+                emit statusMessage(QString("Auto-sized volume to %1^3 voxels "
+                                           "(%2 MB / %3 MB free GPU)")
+                                   .arg(dim)
+                                   .arg(qint64(double(dim)*dim*dim*perVoxel/(1024.0*1024.0)))
+                                   .arg(qint64(freeBytes/(1024*1024))));
+            }
+        }
+
+        // Free the old scanner BEFORE constructing the new one so the
+        // Kinect device handle is released; otherwise re-opening the
+        // device in the new VolumeIntegration races against the old one
+        // still holding it (which causes the next grid-init to see no
+        // valid depth).
+        m_scanner.reset();
         m_scanner.reset(new VolumeIntegration(params.xDim, params.yDim,
                                               params.zDim, params.voxelSize));
         m_scanner->setParameters(params);
@@ -81,7 +113,7 @@ void ScannerWorker::initialize(ScanParameters params) {
             emit statusMessage(QString::fromStdString(msg));
         });
         m_initialized = true;
-        emit initialized();
+        emit initialized(params);
         emit statusMessage("Scanner initialized");
     } catch (const std::exception &e) {
         emit error(QString("Scanner init failed: %1").arg(e.what()));
@@ -234,9 +266,9 @@ void ScannerWorker::saveMesh(QString path) {
         emit error("Extract the mesh first.");
         return;
     }
-    QFileInfo fi(path);
-    std::string name = fi.fileName().toStdString();
-    bool ok = m_scanner->saveMesh(name);
+    // Pass the full path through; VolumeIntegration::saveMesh honors
+    // absolute paths and treats relative names as dataFolder-relative.
+    bool ok = m_scanner->saveMesh(path.toStdString());
     emit statusMessage(ok ? QString("Saved mesh to %1").arg(path)
                           : QString("Failed to save mesh to %1").arg(path));
 }

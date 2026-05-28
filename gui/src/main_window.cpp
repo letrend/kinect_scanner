@@ -194,6 +194,7 @@ void MainWindow::onTogglePause(bool paused) {
 
 void MainWindow::onReset() {
     QMetaObject::invokeMethod(m_worker, "reset", Qt::QueuedConnection);
+    m_viewer3d->clearAccumulated();
     m_meshAvailable = false;
     m_actSaveMesh->setEnabled(false);
 }
@@ -241,8 +242,14 @@ void MainWindow::onCalibrate() {
     QMetaObject::invokeMethod(m_worker, "calibrate", Qt::QueuedConnection);
 }
 
-void MainWindow::onWorkerInitialized() {
+void MainWindow::onWorkerInitialized(ScanParameters effectiveParams) {
     onStatus("Worker ready.");
+    // Reflect any auto-adjustments (e.g. GPU-memory-driven voxel sizing)
+    // back into the parameter panel and viewer.
+    m_paramPanel->setParameters(effectiveParams);
+    m_viewer3d->setVolumeBounds(effectiveParams.xDim * effectiveParams.voxelSize,
+                                effectiveParams.yDim * effectiveParams.voxelSize,
+                                effectiveParams.zDim * effectiveParams.voxelSize);
     // Auto-start scanning so debugging cycles don't require clicking Start.
     QMetaObject::invokeMethod(m_worker, "start", Qt::QueuedConnection);
 }

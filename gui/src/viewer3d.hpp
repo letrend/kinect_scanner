@@ -35,6 +35,8 @@ public slots:
     void setVolumeBounds(float xMeters, float yMeters, float zMeters);
     /// Reset the user view to look at the volume from the front.
     void resetView();
+    /// Clear the accumulated point cloud + trajectory (call on scan reset).
+    void clearAccumulated();
     /// Toggle visibility layers.
     void setShowPointCloud(bool s) { m_showPoints = s; update(); }
     void setShowMesh(bool s)       { m_showMesh   = s; update(); }

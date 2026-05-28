@@ -71,7 +71,7 @@ public slots:
     void calibrate();
 
 signals:
-    void initialized();
+    void initialized(ScanParameters effectiveParams);
     void scanStarted();
     void scanStopped();
     void pausedChanged(bool paused);

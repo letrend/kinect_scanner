@@ -31,7 +31,7 @@ private slots:
     void onSavePreset();
     void onCalibrate();
 
-    void onWorkerInitialized();
+    void onWorkerInitialized(ScanParameters effectiveParams);
     void onWorkerStarted();
     void onWorkerStopped();
     void onWorkerPausedChanged(bool paused);

@@ -312,10 +312,37 @@ void Viewer3D::paintGL() {
 void Viewer3D::setPointCloud(const QVector<float> &xyz,
                               const QVector<unsigned char> &rgb,
                               const QMatrix4x4 &pose) {
-    m_pointsXyz = xyz;
-    m_pointsRgb = rgb;
-    m_pointsPose = pose;
-    m_pointsDirty = true;
+    // Transform incoming camera-space points into world space using the
+    // estimated pose, then append to a bounded ring buffer so the viewer
+    // shows an *accumulated* reconstruction rather than just the current
+    // raycast.
+    const int n = xyz.size() / 3;
+    if (n > 0 && rgb.size() >= n * 3) {
+        const int kMaxPoints = 2000000; // ~24 MB xyz + 6 MB rgb
+        // Drop oldest if we would exceed the cap.
+        int newTotal = (m_pointsXyz.size() / 3) + n;
+        if (newTotal > kMaxPoints) {
+            int drop = newTotal - kMaxPoints;
+            m_pointsXyz.remove(0, drop * 3);
+            m_pointsRgb.remove(0, drop * 3);
+        }
+        m_pointsXyz.reserve(m_pointsXyz.size() + n * 3);
+        m_pointsRgb.reserve(m_pointsRgb.size() + n * 3);
+        for (int i = 0; i < n; ++i) {
+            float x = xyz[3*i + 0];
+            float y = xyz[3*i + 1];
+            float z = xyz[3*i + 2];
+            QVector3D w = pose.map(QVector3D(x, y, z));
+            m_pointsXyz.append(w.x());
+            m_pointsXyz.append(w.y());
+            m_pointsXyz.append(w.z());
+            m_pointsRgb.append(rgb[3*i + 0]);
+            m_pointsRgb.append(rgb[3*i + 1]);
+            m_pointsRgb.append(rgb[3*i + 2]);
+        }
+        m_pointsDirty = true;
+    }
+    m_pointsPose = QMatrix4x4(); // identity: points are already in world
     m_camPose = pose;
     m_camPoseValid = true;
     // append camera origin to trajectory
@@ -347,6 +374,16 @@ void Viewer3D::resetView() {
     m_distance = 3.0f;
     m_yawDeg = 0.0f;
     m_pitchDeg = -15.0f;
+    update();
+}
+
+void Viewer3D::clearAccumulated() {
+    m_pointsXyz.clear();
+    m_pointsRgb.clear();
+    m_pointsDirty = true;
+    m_trajXyz.clear();
+    m_trajDirty = true;
+    m_camPoseValid = false;
     update();
 }
 

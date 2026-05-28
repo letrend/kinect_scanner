@@ -17,7 +17,7 @@ void cuda_check(string file, int line)
 }
 
 VolumeIntegration::VolumeIntegration(uint xDim, uint yDim, uint zDim, float voxelsize):
-        vWidth(xDim), vHeight(yDim), slices(zDim), voxelSize(voxelsize){
+        vWidth(xDim), vHeight(yDim), slices(zDim), voxelSize(voxelsize), mc(nullptr){
     // initialize tunables that come from constructor args
     m_params.xDim      = xDim;
     m_params.yDim      = yDim;
@@ -845,14 +845,26 @@ __global__ void deviceRaycast(float *d_voxelTSDF, float *d_depthModel, unsigned 
                     }
                 }
 
-                d_img[ind_img + pWidth*pHeight*0] = deviceTriliniearInterpolation(d_voxelRed,
-                                                                                  voxelgrid, vWidth, vHeight, slices);
-                d_img[ind_img + pWidth*pHeight*1] = deviceTriliniearInterpolation(d_voxelGreen,
-                                                                                  voxelgrid, vWidth, vHeight, slices);
-                d_img[ind_img + pWidth*pHeight*2] = deviceTriliniearInterpolation(d_voxelBlue,
-                                                                                  voxelgrid, vWidth, vHeight, slices);
-
-                d_depthModel[ind_img] = pixel.z;
+                // Guard against the adaptive refinement walking voxelgrid
+                // off the volume: skip color sampling if any axis is OOB
+                // (TSDFBoundaryCheck above returns -1.0f silently in that
+                // case, leaving voxelgrid potentially out-of-range for the
+                // unchecked color trilinear samples below).
+                if (floorf(voxelgrid.x) >= 0 && ceilf(voxelgrid.x) < (float)vWidth &&
+                    floorf(voxelgrid.y) >= 0 && ceilf(voxelgrid.y) < (float)vHeight &&
+                    floorf(voxelgrid.z) >= 0 && ceilf(voxelgrid.z) < (float)slices) {
+                    d_img[ind_img + pWidth*pHeight*0] = deviceTriliniearInterpolation(d_voxelRed,
+                                                                                      voxelgrid, vWidth, vHeight, slices);
+                    d_img[ind_img + pWidth*pHeight*1] = deviceTriliniearInterpolation(d_voxelGreen,
+                                                                                      voxelgrid, vWidth, vHeight, slices);
+                    d_img[ind_img + pWidth*pHeight*2] = deviceTriliniearInterpolation(d_voxelBlue,
+                                                                                      voxelgrid, vWidth, vHeight, slices);
+                    d_depthModel[ind_img] = pixel.z;
+                } else {
+                    d_img[ind_img + pWidth*pHeight*0] = 0.0f;
+                    d_img[ind_img + pWidth*pHeight*1] = 0.0f;
+                    d_img[ind_img + pWidth*pHeight*2] = 0.0f;
+                }
 
                 terminated = true;
                 break;
@@ -1118,6 +1130,9 @@ void VolumeIntegration::reset(){
     m_frame.store(0);
     m_fps = 0.0f;
     m_lastFrameTimeSec = 0.0;
+    // clear any stale stop request from the previous run so the next
+    // start() can settle the grid position again.
+    m_stopRequested.store(false);
 
     // re-create ICP so it starts from a clean state
     icp = std::shared_ptr<ICPCUDA>(new ICPCUDA(pWidth, pHeight,
@@ -1205,14 +1220,33 @@ __global__ void bilateralFilterKernel(float *img, float *res, int img_width, int
 }
 
 void VolumeIntegration::extractMesh(){
+    // Download the latest GPU volume state to host buffers. In GUI mode
+    // stepOnce() runs the integration without ever calling scan(), so the
+    // host-side tsdf/red/green/blue arrays would otherwise be stale.
+    cudaMemcpy(tsdf,  d_voxelTSDF,  voxelGridBytesFloat, cudaMemcpyDeviceToHost);
+    CUDA_CHECK;
+    cudaMemcpy(red,   d_voxelRed,   voxelGridBytes, cudaMemcpyDeviceToHost);
+    CUDA_CHECK;
+    cudaMemcpy(green, d_voxelGreen, voxelGridBytes, cudaMemcpyDeviceToHost);
+    CUDA_CHECK;
+    cudaMemcpy(blue,  d_voxelBlue,  voxelGridBytes, cudaMemcpyDeviceToHost);
+    CUDA_CHECK;
+
     // extract mesh using marching cubes
     Eigen::Vector3d volumeSize(vWidth, vHeight, slices);
+    if (mc) { delete mc; mc = nullptr; }
     mc = new MarchingCubes(Eigen::Vector3i(vWidth, vHeight, slices), volumeSize.normalized());
     mc->computeIsoSurface(tsdf, red, green, blue, getParameters().isoValue);
 }
 
 bool VolumeIntegration::saveMesh(string name){
-    return mc->savePly(dataFolder + name);
+    if (!mc) return false;
+    // If caller passed an absolute path, honor it; otherwise treat it as a
+    // filename inside dataFolder.
+    const std::string path = (!name.empty() && name[0] == '/')
+                             ? name
+                             : (dataFolder + name);
+    return mc->savePly(path);
 }
 
 bool VolumeIntegration::calibrate(){
