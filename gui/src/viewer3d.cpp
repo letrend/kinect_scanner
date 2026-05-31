@@ -2,6 +2,7 @@
 
 #include <QElapsedTimer>
 #include <QMouseEvent>
+#include <QSizePolicy>
 #include <QWheelEvent>
 #include <cmath>
 
@@ -61,7 +62,8 @@ void main(){
 } // namespace
 
 Viewer3D::Viewer3D(QWidget *parent) : QOpenGLWidget(parent) {
-    setMinimumSize(320, 240);
+    setMinimumSize(160, 120);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setFocusPolicy(Qt::StrongFocus);
 }
 
@@ -69,8 +71,10 @@ Viewer3D::~Viewer3D() {
     makeCurrent();
     m_vboPointsXyz.destroy(); m_vboPointsRgb.destroy();
     m_vboMeshXyz.destroy(); m_vboMeshRgb.destroy(); m_iboMesh.destroy();
+    m_vboSimMeshXyz.destroy(); m_vboSimMeshRgb.destroy(); m_iboSimMesh.destroy();
     m_vboBox.destroy(); m_vboTraj.destroy(); m_vboCam.destroy();
     m_vaoPoints.destroy(); m_vaoMesh.destroy();
+    m_vaoSimMesh.destroy();
     m_vaoBox.destroy(); m_vaoTraj.destroy(); m_vaoCam.destroy();
     doneCurrent();
 }
@@ -91,6 +95,7 @@ void Viewer3D::initializeGL() {
     auto initVao = [](QOpenGLVertexArrayObject &v) { v.create(); };
     initVao(m_vaoPoints);
     initVao(m_vaoMesh);
+    initVao(m_vaoSimMesh);
     initVao(m_vaoBox);
     initVao(m_vaoTraj);
     initVao(m_vaoCam);
@@ -99,6 +104,9 @@ void Viewer3D::initializeGL() {
     m_vboMeshXyz.create();
     m_vboMeshRgb.create();
     m_iboMesh.create();
+    m_vboSimMeshXyz.create();
+    m_vboSimMeshRgb.create();
+    m_iboSimMesh.create();
     m_vboBox.create();
     m_vboTraj.create();
     m_vboCam.create();
@@ -142,6 +150,26 @@ void Viewer3D::uploadMesh() {
                        m_meshIdx.size() * sizeof(unsigned int));
     m_vaoMesh.release();
     m_meshDirty = false;
+}
+
+void Viewer3D::uploadSimulationMesh() {
+    m_vaoSimMesh.bind();
+    m_vboSimMeshXyz.bind();
+    m_vboSimMeshXyz.allocate(m_simMeshXyz.constData(),
+                             m_simMeshXyz.size() * sizeof(float));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+
+    m_vboSimMeshRgb.bind();
+    m_vboSimMeshRgb.allocate(m_simMeshRgb.constData(), m_simMeshRgb.size());
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_UNSIGNED_BYTE, GL_TRUE, 0, nullptr);
+
+    m_iboSimMesh.bind();
+    m_iboSimMesh.allocate(m_simMeshIdx.constData(),
+                          m_simMeshIdx.size() * sizeof(unsigned int));
+    m_vaoSimMesh.release();
+    m_simMeshDirty = false;
 }
 
 void Viewer3D::uploadBounds() {
@@ -295,6 +323,7 @@ void Viewer3D::paintGL() {
 
     if (m_boundsDirty) uploadBounds();
     if (m_pointsDirty && !m_pointsXyz.isEmpty()) uploadPoints();
+    if (m_simMeshDirty && !m_simMeshXyz.isEmpty()) uploadSimulationMesh();
     if (m_meshDirty   && !m_meshXyz.isEmpty())   uploadMesh();
     if (m_trajDirty   && !m_trajXyz.isEmpty())   uploadTraj();
 
@@ -309,6 +338,17 @@ void Viewer3D::paintGL() {
         glDrawArrays(GL_LINES, 0, 24);
         m_vaoBox.release();
         m_progColor.release();
+    }
+    // --- Simulation source mesh ---
+    if (m_showSimMesh && !m_simMeshIdx.isEmpty()) {
+        m_progMesh.bind();
+        m_progMesh.setUniformValue("uMVP", mvp);
+        m_progMesh.setUniformValue("uModel", flipY);
+        m_progMesh.setUniformValue("uLightDir", QVector3D(0.3f, 0.8f, 0.5f));
+        m_vaoSimMesh.bind();
+        glDrawElements(GL_TRIANGLES, m_simMeshIdx.size(), GL_UNSIGNED_INT, nullptr);
+        m_vaoSimMesh.release();
+        m_progMesh.release();
     }
     // --- Points ---
     if (m_showPoints && !m_pointsXyz.isEmpty()) {
@@ -466,20 +506,42 @@ void Viewer3D::setMesh(const QVector<float> &vertices,
     update();
 }
 
+void Viewer3D::setSimulationMesh(const QVector<float> &vertices,
+                                  const QVector<unsigned char> &colors,
+                                  const QVector<unsigned int> &indices) {
+    m_simMeshXyz = vertices;
+    m_simMeshRgb = colors;
+    m_simMeshIdx = indices;
+    m_simMeshDirty = true;
+    update();
+}
+
+void Viewer3D::clearSimulationMesh() {
+    m_simMeshXyz.clear();
+    m_simMeshRgb.clear();
+    m_simMeshIdx.clear();
+    m_simMeshDirty = true;
+    update();
+}
+
 void Viewer3D::setVolumeBounds(float x, float y, float z) {
     m_boundsM = QVector3D(x, y, z);
     m_boundsDirty = true;
+    if (!m_camPoseValid)
+        resetView();
     update();
 }
 
 void Viewer3D::setVolumeCenter(float x, float y, float z) {
     m_volumeCenterM = QVector3D(x, y, z);
+    if (!m_camPoseValid)
+        resetView();
     update();
 }
 
 void Viewer3D::resetView() {
-    m_center = QVector3D(0, 0, 2);
-    m_distance = 3.0f;
+    m_center = m_volumeCenterM;
+    m_distance = qMax(1.0f, qMax(m_boundsM.x(), qMax(m_boundsM.y(), m_boundsM.z())) * 2.0f);
     m_yawDeg = 0.0f;
     m_pitchDeg = -15.0f;
     update();

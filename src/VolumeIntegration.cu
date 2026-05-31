@@ -1,5 +1,7 @@
 #include "VolumeIntegration.cuh"
 
+#include <stdexcept>
+
 // cuda error checking
 string prev_file = "";
 int prev_line = 0;
@@ -16,8 +18,11 @@ void cuda_check(string file, int line)
     prev_line = line;
 }
 
-VolumeIntegration::VolumeIntegration(uint xDim, uint yDim, uint zDim, float voxelsize):
-        vWidth(xDim), vHeight(yDim), slices(zDim), voxelSize(voxelsize), mc(nullptr){
+VolumeIntegration::VolumeIntegration(uint xDim, uint yDim, uint zDim, float voxelsize,
+                                     std::shared_ptr<FrameSource> frameSource):
+        vWidth(xDim), vHeight(yDim), slices(zDim), voxelSize(voxelsize),
+        m_frameSource(frameSource ? frameSource : std::shared_ptr<FrameSource>(new FreenectFrameSource)),
+        mc(nullptr){
     // initialize tunables that come from constructor args
     m_params.xDim      = xDim;
     m_params.yDim      = yDim;
@@ -28,24 +33,30 @@ VolumeIntegration::VolumeIntegration(uint xDim, uint yDim, uint zDim, float voxe
     pose_inv = Eigen::Matrix4f::Identity();
 
     // initialize cuda context
+    int cudaDeviceCount = 0;
+    cudaError_t deviceErr = cudaGetDeviceCount(&cudaDeviceCount);
+    if (deviceErr != cudaSuccess || cudaDeviceCount <= 0) {
+        throw std::runtime_error(std::string("No CUDA-capable device is available: ") +
+                                 cudaGetErrorString(deviceErr));
+    }
     cudaDeviceSynchronize();
     CUDA_CHECK;
 
+    m_cameraIntrinsics = m_frameSource->intrinsics();
+
     // image resolution and number of color channels
-    pWidth = 512;
-    pHeight = 424;
+    pWidth = m_cameraIntrinsics.width;
+    pHeight = m_cameraIntrinsics.height;
     nc = 3;
-
-    // Initialize Kinect
-
-    device = new MyFreenectDevice;
 
 
     dataFolder = "/home/roboy/workspace/kinect_scanner/build/data/";//string(STR(TSDF_CUDA_SOURCE_DIR))+ "/data/";
 
     // initialize intrinsic and inverse intrinsic matrix
     Eigen::Matrix3f K;
-    K << device->irCameraParams.fx, 0.0, device->irCameraParams.cx, 0.0, device->irCameraParams.fy, device->irCameraParams.cy, 0.0, 0.0, 1.0;
+    K << m_cameraIntrinsics.fx, 0.0, m_cameraIntrinsics.cx,
+         0.0, m_cameraIntrinsics.fy, m_cameraIntrinsics.cy,
+         0.0, 0.0, 1.0;
     Eigen::Matrix3f Kinv = K.inverse();
     float *h_k = new float[3 * 3];
     float *h_kinv = new float[3 * 3];
@@ -181,9 +192,9 @@ VolumeIntegration::VolumeIntegration(uint xDim, uint yDim, uint zDim, float voxe
     mOut = cv::Mat(pHeight, pWidth, CV_32FC3);
 
     // initialize icpcuda
-    icp = std::shared_ptr<ICPCUDA>(new ICPCUDA(pWidth, pHeight, device->irCameraParams.cx,
-                      device->irCameraParams.cy, device->irCameraParams.fx,
-                      device->irCameraParams.fy,
+    icp = std::shared_ptr<ICPCUDA>(new ICPCUDA(pWidth, pHeight, m_cameraIntrinsics.cx,
+                      m_cameraIntrinsics.cy, m_cameraIntrinsics.fx,
+                      m_cameraIntrinsics.fy,
                       m_params.icpDistThresh, m_params.icpAngleThresh));
 }
 VolumeIntegration::~VolumeIntegration(){
@@ -224,7 +235,6 @@ VolumeIntegration::~VolumeIntegration(){
     delete[] red;
     delete[] green;
     delete[] blue;
-    delete device;
 }
 bool VolumeIntegration::intializeGridPosition(){
     const bool useDisplay = getParameters().useDisplay;
@@ -238,10 +248,10 @@ bool VolumeIntegration::intializeGridPosition(){
     while (true) {
         if (m_stopRequested.load())
             return false;
-        if(!device->updateFrames())
+        if(!m_frameSource->updateFrames())
             continue;
-        device->getDepthMM(depth1);
-        device->getRgbMapped2Depth(color);
+        m_frameSource->getDepthMM(depth1);
+        m_frameSource->getRgbMapped2Depth(color);
 
         if (useDisplay) {
             cv::imshow("color", color);
@@ -270,25 +280,37 @@ bool VolumeIntegration::intializeGridPosition(){
         }
     }
 
-    // Place the voxel grid so its center sits at the user-configured
-    // offset from the camera's initial pose (camera frame: +X right,
-    // +Y down, +Z forward). No depth-based object detection.
-    //
-    // Push the volume forward if necessary so that the near face sits in
-    // front of the camera frustum (Kinect v2 near-clip ~0.30 m, plus the
-    // ~0.20 m frustum widget drawn in the 3D viewer => 0.50 m clearance).
     ScanParameters sp = getParameters();
     const float halfX = (vWidth  * voxelSize) / 2.0f;
     const float halfY = (vHeight * voxelSize) / 2.0f;
     const float halfZ = (slices  * voxelSize) / 2.0f;
-    const float minNearFaceZ = 0.50f;        // metres in front of camera
-    float centerZ = sp.gridInitOffsetZ;
-    if (centerZ - halfZ < minNearFaceZ) {
-        centerZ = halfZ + minNearFaceZ;
+
+    if (sp.poseSource == PoseSourceSimulation || sp.poseSource == PoseSourceActuatedTcp) {
+        // External-pose scans use the turntable / target center as world
+        // origin. Center the TSDF there so the commanded orbit goes around
+        // the scan volume rather than around a camera-derived offset.
+        gridLocation[0] = -halfX;
+        gridLocation[1] = -halfY;
+        gridLocation[2] = -halfZ;
+    } else {
+        // ICP/Kinect-only scans place the voxel grid at the user-configured
+        // offset from the initial camera pose (camera frame: +X right,
+        // +Y down, +Z forward). No depth-based object detection.
+        //
+        // Push the volume forward if necessary so that the near face sits in
+        // front of the camera frustum (Kinect v2 near-clip ~0.30 m, plus the
+        // ~0.20 m frustum widget drawn in the 3D viewer => 0.50 m clearance).
+        const float minNearFaceZ = 0.50f;        // metres in front of camera
+        float centerZ = sp.gridInitOffsetZ;
+        if (centerZ - halfZ < minNearFaceZ) {
+            centerZ = halfZ + minNearFaceZ;
+        }
+        Eigen::Vector4f centerCamera(sp.gridInitOffsetX, sp.gridInitOffsetY, centerZ, 1.0f);
+        Eigen::Vector4f centerWorld = pose * centerCamera;
+        gridLocation[0] = centerWorld.x() - halfX;
+        gridLocation[1] = centerWorld.y() - halfY;
+        gridLocation[2] = centerWorld.z() - halfZ;
     }
-    gridLocation[0] = sp.gridInitOffsetX - halfX;
-    gridLocation[1] = sp.gridInitOffsetY - halfY;
-    gridLocation[2] = centerZ            - halfZ;
 
     cudaMemcpyToSymbol(c_gridLocation, gridLocation, 3 * sizeof(float));
     CUDA_CHECK;
@@ -471,6 +493,7 @@ __global__ void deviceCalculateLocalNormals(float3 *d_v, float3 *d_normals, size
 }
 
 __global__ void deviceCalculateTSDF(float *d_depth, float *d_color, float3 *d_normals, size_t pWidth, size_t pHeight, float maxTruncation,
+                                    float depthEdgeThreshold,
                                     float *d_voxelTSDF, float *d_voxelWeight, float *d_voxelWeightColor, unsigned char *d_voxelRed, unsigned char *d_voxelGreen,
                                     unsigned char *d_voxelBlue, float voxelSize, size_t vWidth, size_t vHeight, size_t slice)
 {
@@ -550,13 +573,36 @@ __global__ void deviceCalculateTSDF(float *d_depth, float *d_color, float3 *d_no
         // index in image arrays (depth only - add pWidth*pHeight*c for color channel)
         ssize_t pX = llrintf(p.x);
         ssize_t pY = llrintf(p.y);
-        size_t ind_depth = pX + pWidth*pY;
 
         // if voxel is visible in camera frustum AND has a valid depth (greater than 0 and not NaN)
         if(pX >= 0 && pX < pWidth && pY >= 0 && pY < pHeight && p.z > near && p.z <= far
-           && d_depth[ind_depth] > 0.0f ) {//&& isfinite(d_depth[ind_depth])
+           ) {
+            size_t ind_depth = (size_t)pX + pWidth*(size_t)pY;
+            float centerDepth = d_depth[ind_depth];
+            bool validDepth = centerDepth > 0.0f && centerDepth == centerDepth;
 
-            float sdf = p.z	- d_depth[ind_depth];
+            if(validDepth && depthEdgeThreshold > 0.0f) {
+                if(pX <= 0 || pX >= (ssize_t)pWidth - 1 || pY <= 0 || pY >= (ssize_t)pHeight - 1) {
+                    validDepth = false;
+                }
+                for(int yy = -1; validDepth && yy <= 1; ++yy) {
+                    for(int xx = -1; xx <= 1; ++xx) {
+                        size_t ni = (size_t)(pX + xx) + pWidth*(size_t)(pY + yy);
+                        float neighborDepth = d_depth[ni];
+                        if(!(neighborDepth > 0.0f) || neighborDepth != neighborDepth ||
+                           fabsf(neighborDepth - centerDepth) > depthEdgeThreshold) {
+                            validDepth = false;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if(!validDepth) {
+                return;
+            }
+
+            float sdf = p.z	- centerDepth;
             if(sdf <= maxTruncation) {
                 // calculate preliminary tsdf value
                 float tsdf;
@@ -582,14 +628,20 @@ __global__ void deviceCalculateTSDF(float *d_depth, float *d_color, float3 *d_no
                 float blue  = d_color[ind_depth + (size_t)pWidth*pHeight*2]*255.0f ;
 
                 // calculate weight
+                float normalWeight = fabsf(d_normals[ind_depth].z);
+                if(!(normalWeight > 0.0f) || normalWeight != normalWeight) {
+                    return;
+                }
+                normalWeight = fmaxf(0.05f, normalWeight);
+
                 float oldWeight = d_voxelWeight[ind_voxel];
-                float newWeight = d_normals[ind_depth].z;
+                float newWeight = normalWeight;
                 float weight = oldWeight + newWeight;
                 float invWeight = 1.0f / weight;
 
                 // calculate color weight
                 float oldWeightColor = d_voxelWeightColor[ind_voxel];
-                float newWeightColor = d_normals[ind_depth].z;
+                float newWeightColor = normalWeight;
 #if defined(TSDF_WEIGHTING)
                 newWeightColor *= tsdfWeight;
 #elif defined(TSDF_EXP_WEIGHTING)
@@ -902,10 +954,10 @@ bool VolumeIntegration::stepOnce(){
     const bool useDisplay = p.useDisplay;
 
     // get new kinect frames
-    if(!device->updateFrames())
+    if(!m_frameSource->updateFrames())
         return false;
-    device->getDepthMM(depth1);
-    device->getRgbMapped2Depth(color);
+    m_frameSource->getDepthMM(depth1);
+    m_frameSource->getRgbMapped2Depth(color);
 
     if (useDisplay) {
         cv::imshow("color", color);
@@ -958,7 +1010,7 @@ bool VolumeIntegration::stepOnce(){
     cudaDeviceSynchronize();
     CUDA_CHECK;
 
-    if (frame > 0) {
+    if (p.poseSource == PoseSourceIcp && frame > 0) {
         cudaMemcpy(imgDepthFiltered, d_depthFiltered, bytesFloat,
                    cudaMemcpyDeviceToHost);
         CUDA_CHECK;
@@ -968,6 +1020,13 @@ bool VolumeIntegration::stepOnce(){
         icp->getPoseFromDepth(depth0, depthFiltered);
         pose = icp->getPose().cast<float>();
         pose_inv = icp->getPose_inv().cast<float>();
+    } else if (p.poseSource != PoseSourceIcp) {
+        if (!m_externalPoseValid) {
+            if (m_onStatus) m_onStatus("External pose source has no valid pose.");
+            return false;
+        }
+        pose = m_externalPose;
+        pose_inv = pose.inverse();
     }
 
     // set (inverse) camera pose and write it to constant device memory
@@ -987,7 +1046,7 @@ bool VolumeIntegration::stepOnce(){
     // sweep through the voxel grid slice by slice
     for (size_t slice = 0; slice < slices; slice++) {
         deviceCalculateTSDF<<<gridVoxel, block>>>(d_depth, d_color,
-                d_normals, pWidth, pHeight, p.maxTruncation, d_voxelTSDF,
+                d_normals, pWidth, pHeight, p.maxTruncation, p.depthEdgeThreshold, d_voxelTSDF,
                 d_voxelWeight, d_voxelWeightColor, d_voxelRed, d_voxelGreen,
                 d_voxelBlue,voxelSize, vWidth, vHeight, slice);
         cudaDeviceSynchronize();
@@ -1068,6 +1127,15 @@ ScanParameters VolumeIntegration::getParameters() const{
     return m_params;
 }
 
+void VolumeIntegration::setExternalPose(const Eigen::Matrix4f &externalPose){
+    pose = externalPose;
+    pose_inv = pose.inverse();
+    m_externalPose = externalPose;
+    m_externalPoseValid = true;
+    if (m_frameSource)
+        m_frameSource->setCameraPose(externalPose);
+}
+
 void VolumeIntegration::setOnFrame(FrameCallback cb){
     std::lock_guard<std::mutex> lock(m_paramsMutex);
     m_onFrame = std::move(cb);
@@ -1098,6 +1166,8 @@ void VolumeIntegration::reset(){
     // reset pose
     pose     = Eigen::Matrix4f::Identity();
     pose_inv = Eigen::Matrix4f::Identity();
+    m_externalPose = Eigen::Matrix4f::Identity();
+    m_externalPoseValid = false;
     m_frame.store(0);
     m_fps = 0.0f;
     m_lastFrameTimeSec = 0.0;
@@ -1107,8 +1177,8 @@ void VolumeIntegration::reset(){
 
     // re-create ICP so it starts from a clean state
     icp = std::shared_ptr<ICPCUDA>(new ICPCUDA(pWidth, pHeight,
-          device->irCameraParams.cx, device->irCameraParams.cy,
-          device->irCameraParams.fx, device->irCameraParams.fy,
+          m_cameraIntrinsics.cx, m_cameraIntrinsics.cy,
+          m_cameraIntrinsics.fx, m_cameraIntrinsics.fy,
           m_params.icpDistThresh, m_params.icpAngleThresh));
 }
 
@@ -1257,9 +1327,9 @@ bool VolumeIntegration::calibrate(){
         Mat view;
         bool blinkOutput = false;
 
-        if(!device->updateFrames())
+        if(!m_frameSource->updateFrames())
             continue;
-        device->getVideo(view);
+        m_frameSource->getVideo(view);
         resize(view,view,Size(512, 424));
 
         //-----  If no more image, or got enough, then stop calibration and show result -------------

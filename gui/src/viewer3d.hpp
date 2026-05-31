@@ -31,6 +31,11 @@ public slots:
     void setMesh(const QVector<float> &vertices,
                  const QVector<unsigned char> &colors,
                  const QVector<unsigned int> &indices);
+    /// Replace the visible source mesh used by simulation mode.
+    void setSimulationMesh(const QVector<float> &vertices,
+                           const QVector<unsigned char> &colors,
+                           const QVector<unsigned int> &indices);
+    void clearSimulationMesh();
     /// Set the axis-aligned volume bounding-box size in meters.
     void setVolumeBounds(float xMeters, float yMeters, float zMeters);
     /// Set the world-space center of the volume bounding-box (meters,
@@ -61,6 +66,7 @@ protected:
 private:
     void uploadPoints();
     void uploadMesh();
+    void uploadSimulationMesh();
     void uploadBounds();
     void uploadTraj();
     void uploadCamera();
@@ -70,11 +76,15 @@ private:
     QOpenGLShaderProgram m_progMesh;  // mesh: simple Phong + vertex colour
 
     QOpenGLVertexArrayObject m_vaoPoints, m_vaoMesh, m_vaoBox, m_vaoTraj, m_vaoCam;
+    QOpenGLVertexArrayObject m_vaoSimMesh;
     QOpenGLBuffer m_vboPointsXyz{QOpenGLBuffer::VertexBuffer};
     QOpenGLBuffer m_vboPointsRgb{QOpenGLBuffer::VertexBuffer};
     QOpenGLBuffer m_vboMeshXyz{QOpenGLBuffer::VertexBuffer};
     QOpenGLBuffer m_vboMeshRgb{QOpenGLBuffer::VertexBuffer};
     QOpenGLBuffer m_iboMesh{QOpenGLBuffer::IndexBuffer};
+    QOpenGLBuffer m_vboSimMeshXyz{QOpenGLBuffer::VertexBuffer};
+    QOpenGLBuffer m_vboSimMeshRgb{QOpenGLBuffer::VertexBuffer};
+    QOpenGLBuffer m_iboSimMesh{QOpenGLBuffer::IndexBuffer};
     QOpenGLBuffer m_vboBox{QOpenGLBuffer::VertexBuffer};
     QOpenGLBuffer m_vboTraj{QOpenGLBuffer::VertexBuffer};
     QOpenGLBuffer m_vboCam{QOpenGLBuffer::VertexBuffer};
@@ -90,6 +100,11 @@ private:
     QVector<unsigned char> m_meshRgb;
     QVector<unsigned int>  m_meshIdx;
     bool m_meshDirty = false;
+
+    QVector<float>         m_simMeshXyz;
+    QVector<unsigned char> m_simMeshRgb;
+    QVector<unsigned int>  m_simMeshIdx;
+    bool m_simMeshDirty = false;
 
     QVector<float> m_trajXyz; // appended each pose update
     bool m_trajDirty = false;
@@ -112,6 +127,7 @@ private:
 
     bool m_showPoints = true;
     bool m_showMesh   = true;
+    bool m_showSimMesh = true;
     bool m_showTraj   = true;
     bool m_cameraLocked = true;
 

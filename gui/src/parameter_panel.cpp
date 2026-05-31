@@ -6,7 +6,9 @@
 #include <QSpinBox>
 #include <QDoubleSpinBox>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QLabel>
+#include <QLineEdit>
 
 ParameterPanel::ParameterPanel(QWidget *parent) : QWidget(parent) {
     m_debounce.setSingleShot(true);
@@ -14,6 +16,7 @@ ParameterPanel::ParameterPanel(QWidget *parent) : QWidget(parent) {
     connect(&m_debounce, &QTimer::timeout, this, &ParameterPanel::flush);
 
     auto *layout = new QVBoxLayout(this);
+    layout->addWidget(buildPoseSourceGroup());
     layout->addWidget(buildVolumeGroup());
     layout->addWidget(buildTsdfGroup());
     layout->addWidget(buildBilateralGroup());
@@ -24,6 +27,137 @@ ParameterPanel::ParameterPanel(QWidget *parent) : QWidget(parent) {
 
     // Initialize widgets from defaults.
     setParameters(ScanParameters{});
+}
+
+QGroupBox *ParameterPanel::buildPoseSourceGroup() {
+    auto *g = new QGroupBox("Pose source / simulation");
+    auto *f = new QFormLayout(g);
+
+    m_poseSource = new QComboBox;
+    m_poseSource->addItem("ICP", PoseSourceIcp);
+    m_poseSource->addItem("Actuated TCP", PoseSourceActuatedTcp);
+    m_poseSource->addItem("Simulation", PoseSourceSimulation);
+    m_simStlPath = new QLineEdit;
+    m_simStlPath->setPlaceholderText("path/to/object.stl");
+
+    auto makeDeg = [] {
+        auto *w = new QDoubleSpinBox;
+        w->setRange(-36000.0, 36000.0);
+        w->setDecimals(2);
+        w->setSingleStep(5.0);
+        w->setSuffix(" deg");
+        return w;
+    };
+    auto makeMm = [] {
+        auto *w = new QDoubleSpinBox;
+        w->setRange(-10000.0, 10000.0);
+        w->setDecimals(2);
+        w->setSingleStep(10.0);
+        w->setSuffix(" mm");
+        return w;
+    };
+
+    m_angleStart = makeDeg();
+    m_angleEnd = makeDeg();
+    m_angleStep = makeDeg();
+    m_stageStart = makeMm();
+    m_stageEnd = makeMm();
+    m_stageStep = makeMm();
+    m_framesPerPose = new QSpinBox;
+    m_framesPerPose->setRange(1, 100);
+    m_targetSettle = new QDoubleSpinBox;
+    m_targetSettle->setRange(0.0, 60000.0);
+    m_targetSettle->setDecimals(0);
+    m_targetSettle->setSingleStep(50.0);
+    m_targetSettle->setSuffix(" ms");
+    m_angleTolerance = makeDeg();
+    m_angleTolerance->setRange(0.0, 180.0);
+    m_stageTolerance = makeMm();
+    m_stageTolerance->setRange(0.0, 1000.0);
+    m_targetTimeout = new QDoubleSpinBox;
+    m_targetTimeout->setRange(1.0, 600000.0);
+    m_targetTimeout->setDecimals(0);
+    m_targetTimeout->setSingleStep(1000.0);
+    m_targetTimeout->setSuffix(" ms");
+    m_turntableRadius = makeMm();
+    m_turntableRadius->setRange(1.0, 5000.0);
+    m_turntableHeight = makeMm();
+    m_turntableHeight->setRange(0.0, 5000.0);
+    m_kinectX = makeMm();
+    m_kinectY = makeMm();
+    m_kinectZ = makeMm();
+    m_kinectRoll = makeDeg();
+    m_kinectPitch = makeDeg();
+    m_kinectYaw = makeDeg();
+    auto makeAxis = [] {
+        auto *w = new QDoubleSpinBox;
+        w->setRange(-1.0, 1.0);
+        w->setDecimals(3);
+        w->setSingleStep(0.1);
+        return w;
+    };
+    m_stageAxisX = makeAxis();
+    m_stageAxisY = makeAxis();
+    m_stageAxisZ = makeAxis();
+    m_actuatorHost = new QLineEdit;
+    m_actuatorHost->setPlaceholderText("0.0.0.0");
+    m_actuatorPort = new QSpinBox;
+    m_actuatorPort->setRange(1, 65535);
+    m_depthNoise = makeMm();
+    m_depthNoise->setRange(0.0, 100.0);
+    m_dropout = new QDoubleSpinBox;
+    m_dropout->setRange(0.0, 100.0);
+    m_dropout->setDecimals(2);
+    m_dropout->setSingleStep(1.0);
+    m_dropout->setSuffix(" %");
+
+    f->addRow("Mode", m_poseSource);
+    f->addRow("STL path", m_simStlPath);
+    f->addRow("Angle start", m_angleStart);
+    f->addRow("Angle end", m_angleEnd);
+    f->addRow("Angle step", m_angleStep);
+    f->addRow("Stage start", m_stageStart);
+    f->addRow("Stage end", m_stageEnd);
+    f->addRow("Stage step", m_stageStep);
+    f->addRow("Frames / pose", m_framesPerPose);
+    f->addRow("Settle", m_targetSettle);
+    f->addRow("Angle tolerance", m_angleTolerance);
+    f->addRow("Stage tolerance", m_stageTolerance);
+    f->addRow("Target timeout", m_targetTimeout);
+    f->addRow("Turntable radius", m_turntableRadius);
+    f->addRow("Turntable height", m_turntableHeight);
+    f->addRow("Kinect X", m_kinectX);
+    f->addRow("Kinect Y", m_kinectY);
+    f->addRow("Kinect Z", m_kinectZ);
+    f->addRow("Kinect roll", m_kinectRoll);
+    f->addRow("Kinect pitch", m_kinectPitch);
+    f->addRow("Kinect yaw", m_kinectYaw);
+    f->addRow("Stage axis X", m_stageAxisX);
+    f->addRow("Stage axis Y", m_stageAxisY);
+    f->addRow("Stage axis Z", m_stageAxisZ);
+    f->addRow("Actuator host", m_actuatorHost);
+    f->addRow("Actuator port", m_actuatorPort);
+    f->addRow("Depth noise", m_depthNoise);
+    f->addRow("Dropout", m_dropout);
+
+    connect(m_poseSource, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &ParameterPanel::onVolumeChanged);
+    connect(m_simStlPath, &QLineEdit::textChanged, this, &ParameterPanel::onVolumeChanged);
+    connect(m_actuatorHost, &QLineEdit::textChanged, this, &ParameterPanel::onVolumeChanged);
+    for (auto *w : { m_angleStart, m_angleEnd, m_angleStep, m_stageStart,
+                     m_stageEnd, m_stageStep, m_turntableRadius, m_turntableHeight,
+                     m_kinectX, m_kinectY, m_kinectZ, m_kinectRoll, m_kinectPitch,
+                     m_kinectYaw, m_stageAxisX, m_stageAxisY, m_stageAxisZ,
+                     m_targetSettle, m_angleTolerance, m_stageTolerance,
+                     m_targetTimeout, m_depthNoise, m_dropout }) {
+        connect(w, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                this, &ParameterPanel::onVolumeChanged);
+    }
+    connect(m_framesPerPose, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, &ParameterPanel::onVolumeChanged);
+    connect(m_actuatorPort, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, &ParameterPanel::onVolumeChanged);
+    return g;
 }
 
 QGroupBox *ParameterPanel::buildVolumeGroup() {
@@ -71,9 +205,14 @@ QGroupBox *ParameterPanel::buildTsdfGroup() {
     m_maxTrunc = new QDoubleSpinBox;
     m_maxTrunc->setRange(0.001, 0.5); m_maxTrunc->setSingleStep(0.005);
     m_maxTrunc->setDecimals(4); m_maxTrunc->setSuffix(" m");
+    m_depthEdge = new QDoubleSpinBox;
+    m_depthEdge->setRange(0.0, 0.5); m_depthEdge->setSingleStep(0.005);
+    m_depthEdge->setDecimals(4); m_depthEdge->setSuffix(" m");
     f->addRow("Max truncation", m_maxTrunc);
-    connect(m_maxTrunc, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-            this, &ParameterPanel::onAnyChanged);
+    f->addRow("Depth edge reject", m_depthEdge);
+    for (auto *w : { m_maxTrunc, m_depthEdge })
+        connect(w, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                this, &ParameterPanel::onAnyChanged);
     return g;
 }
 
@@ -155,6 +294,35 @@ QGroupBox *ParameterPanel::buildMcGroup() {
 void ParameterPanel::setParameters(const ScanParameters &p) {
     m_loading = true;
     m_current = p;
+    int poseIdx = m_poseSource->findData(p.poseSource);
+    m_poseSource->setCurrentIndex(poseIdx >= 0 ? poseIdx : 0);
+    m_simStlPath->setText(QString::fromStdString(p.simStlPath));
+    m_angleStart->setValue(p.angleStartDeg);
+    m_angleEnd->setValue(p.angleEndDeg);
+    m_angleStep->setValue(p.angleStepDeg);
+    m_stageStart->setValue(p.stageStartMm);
+    m_stageEnd->setValue(p.stageEndMm);
+    m_stageStep->setValue(p.stageStepMm);
+    m_framesPerPose->setValue(p.framesPerPose);
+    m_targetSettle->setValue(p.targetSettleMs);
+    m_angleTolerance->setValue(p.angleToleranceDeg);
+    m_stageTolerance->setValue(p.stageToleranceMm);
+    m_targetTimeout->setValue(p.targetTimeoutMs);
+    m_turntableRadius->setValue(p.turntableRadiusMm);
+    m_turntableHeight->setValue(p.turntableHeightMm);
+    m_kinectX->setValue(p.kinectOffsetXMm);
+    m_kinectY->setValue(p.kinectOffsetYMm);
+    m_kinectZ->setValue(p.kinectOffsetZMm);
+    m_kinectRoll->setValue(p.kinectRollDeg);
+    m_kinectPitch->setValue(p.kinectPitchDeg);
+    m_kinectYaw->setValue(p.kinectYawDeg);
+    m_stageAxisX->setValue(p.stageAxisX);
+    m_stageAxisY->setValue(p.stageAxisY);
+    m_stageAxisZ->setValue(p.stageAxisZ);
+    m_actuatorHost->setText(QString::fromStdString(p.actuatorTcpHost));
+    m_actuatorPort->setValue(p.actuatorTcpPort);
+    m_depthNoise->setValue(p.simDepthNoiseMm);
+    m_dropout->setValue(p.simDropoutPercent);
     m_xDim->setValue((int)p.xDim);
     m_yDim->setValue((int)p.yDim);
     m_zDim->setValue((int)p.zDim);
@@ -163,6 +331,7 @@ void ParameterPanel::setParameters(const ScanParameters &p) {
     m_offsetY->setValue(p.gridInitOffsetY);
     m_offsetZ->setValue(p.gridInitOffsetZ);
     m_maxTrunc->setValue(p.maxTruncation);
+    m_depthEdge->setValue(p.depthEdgeThreshold);
     m_sigmaD->setValue(p.sigma_d);
     m_sigmaR->setValue(p.sigma_r);
     m_normalThresh->setValue(p.normalThreshold);
@@ -179,6 +348,34 @@ void ParameterPanel::setParameters(const ScanParameters &p) {
 }
 
 void ParameterPanel::setVolumeEditable(bool editable) {
+    m_poseSource->setEnabled(editable);
+    m_simStlPath->setEnabled(editable);
+    m_angleStart->setEnabled(editable);
+    m_angleEnd->setEnabled(editable);
+    m_angleStep->setEnabled(editable);
+    m_stageStart->setEnabled(editable);
+    m_stageEnd->setEnabled(editable);
+    m_stageStep->setEnabled(editable);
+    m_framesPerPose->setEnabled(editable);
+    m_targetSettle->setEnabled(editable);
+    m_angleTolerance->setEnabled(editable);
+    m_stageTolerance->setEnabled(editable);
+    m_targetTimeout->setEnabled(editable);
+    m_turntableRadius->setEnabled(editable);
+    m_turntableHeight->setEnabled(editable);
+    m_kinectX->setEnabled(editable);
+    m_kinectY->setEnabled(editable);
+    m_kinectZ->setEnabled(editable);
+    m_kinectRoll->setEnabled(editable);
+    m_kinectPitch->setEnabled(editable);
+    m_kinectYaw->setEnabled(editable);
+    m_stageAxisX->setEnabled(editable);
+    m_stageAxisY->setEnabled(editable);
+    m_stageAxisZ->setEnabled(editable);
+    m_actuatorHost->setEnabled(editable);
+    m_actuatorPort->setEnabled(editable);
+    m_depthNoise->setEnabled(editable);
+    m_dropout->setEnabled(editable);
     m_xDim->setEnabled(editable);
     m_yDim->setEnabled(editable);
     m_zDim->setEnabled(editable);
@@ -206,6 +403,36 @@ void ParameterPanel::onVolumeChanged() {
 }
 
 void ParameterPanel::flush() {
+    m_current.poseSource = m_poseSource->currentData().toInt();
+    m_current.simulationEnabled = (m_current.poseSource == PoseSourceSimulation);
+    m_current.actuatorTcpEnabled = (m_current.poseSource == PoseSourceActuatedTcp);
+    m_current.simStlPath = m_simStlPath->text().toStdString();
+    m_current.angleStartDeg = (float)m_angleStart->value();
+    m_current.angleEndDeg = (float)m_angleEnd->value();
+    m_current.angleStepDeg = (float)m_angleStep->value();
+    m_current.stageStartMm = (float)m_stageStart->value();
+    m_current.stageEndMm = (float)m_stageEnd->value();
+    m_current.stageStepMm = (float)m_stageStep->value();
+    m_current.framesPerPose = m_framesPerPose->value();
+    m_current.targetSettleMs = (float)m_targetSettle->value();
+    m_current.angleToleranceDeg = (float)m_angleTolerance->value();
+    m_current.stageToleranceMm = (float)m_stageTolerance->value();
+    m_current.targetTimeoutMs = (float)m_targetTimeout->value();
+    m_current.turntableRadiusMm = (float)m_turntableRadius->value();
+    m_current.turntableHeightMm = (float)m_turntableHeight->value();
+    m_current.kinectOffsetXMm = (float)m_kinectX->value();
+    m_current.kinectOffsetYMm = (float)m_kinectY->value();
+    m_current.kinectOffsetZMm = (float)m_kinectZ->value();
+    m_current.kinectRollDeg = (float)m_kinectRoll->value();
+    m_current.kinectPitchDeg = (float)m_kinectPitch->value();
+    m_current.kinectYawDeg = (float)m_kinectYaw->value();
+    m_current.stageAxisX = (float)m_stageAxisX->value();
+    m_current.stageAxisY = (float)m_stageAxisY->value();
+    m_current.stageAxisZ = (float)m_stageAxisZ->value();
+    m_current.actuatorTcpHost = m_actuatorHost->text().toStdString();
+    m_current.actuatorTcpPort = m_actuatorPort->value();
+    m_current.simDepthNoiseMm = (float)m_depthNoise->value();
+    m_current.simDropoutPercent = (float)m_dropout->value();
     m_current.xDim      = (unsigned)m_xDim->value();
     m_current.yDim      = (unsigned)m_yDim->value();
     m_current.zDim      = (unsigned)m_zDim->value();
@@ -214,6 +441,7 @@ void ParameterPanel::flush() {
     m_current.gridInitOffsetY = (float)m_offsetY->value();
     m_current.gridInitOffsetZ = (float)m_offsetZ->value();
     m_current.maxTruncation  = (float)m_maxTrunc->value();
+    m_current.depthEdgeThreshold = (float)m_depthEdge->value();
     m_current.sigma_d        = (float)m_sigmaD->value();
     m_current.sigma_r        = (float)m_sigmaR->value();
     m_current.normalThreshold = (float)m_normalThresh->value();

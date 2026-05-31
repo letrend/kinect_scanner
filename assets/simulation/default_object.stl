@@ -1,0 +1,100 @@
+solid default_scan_object
+  facet normal 0 0 -1
+    outer loop
+      vertex -60 -60 0
+      vertex 60 60 0
+      vertex 60 -60 0
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex -60 -60 0
+      vertex -60 60 0
+      vertex 60 60 0
+    endloop
+  endfacet
+  facet normal 0 -1 0
+    outer loop
+      vertex -60 -60 0
+      vertex 60 -60 0
+      vertex 50 -50 120
+    endloop
+  endfacet
+  facet normal 0 -1 0
+    outer loop
+      vertex -60 -60 0
+      vertex 50 -50 120
+      vertex -50 -50 120
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex 60 -60 0
+      vertex 60 60 0
+      vertex 50 50 120
+    endloop
+  endfacet
+  facet normal 1 0 0
+    outer loop
+      vertex 60 -60 0
+      vertex 50 50 120
+      vertex 50 -50 120
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex 60 60 0
+      vertex -60 60 0
+      vertex -50 50 120
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex 60 60 0
+      vertex -50 50 120
+      vertex 50 50 120
+    endloop
+  endfacet
+  facet normal -1 0 0
+    outer loop
+      vertex -60 60 0
+      vertex -60 -60 0
+      vertex -50 -50 120
+    endloop
+  endfacet
+  facet normal -1 0 0
+    outer loop
+      vertex -60 60 0
+      vertex -50 -50 120
+      vertex -50 50 120
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex -50 -50 120
+      vertex 50 -50 120
+      vertex 0 0 190
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex 50 -50 120
+      vertex 50 50 120
+      vertex 0 0 190
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex 50 50 120
+      vertex -50 50 120
+      vertex 0 0 190
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex -50 50 120
+      vertex -50 -50 120
+      vertex 0 0 190
+    endloop
+  endfacet
+endsolid default_scan_object

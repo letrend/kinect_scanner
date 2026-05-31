@@ -8,6 +8,7 @@
 #include <memory>
 
 #include "VolumeIntegration.cuh"
+#include "actuator_tcp_server.hpp"
 #include "scan_parameters.hpp"
 
 Q_DECLARE_METATYPE(ScanParameters)
@@ -90,15 +91,24 @@ signals:
     void meshReady(QVector<float> vertices,
                    QVector<unsigned char> colors,
                    QVector<unsigned int> indices);
+    void simulationMeshReady(QVector<float> vertices,
+                             QVector<unsigned char> colors,
+                             QVector<unsigned int> indices);
 
     void statusMessage(QString msg);
     void error(QString msg);
 
 private:
     void runLoop();
+    void runSimulationLoop();
+    void runActuatedLoop();
+    bool waitForActuatorTarget(const ScanParameters &p, float angleDeg, float stageMm,
+                               ActuatorState *state);
     void emitFromBundle(const FrameBundle &fb);
+    Eigen::Matrix4f poseForTarget(const ScanParameters &p, float angleDeg, float stageMm) const;
 
     std::unique_ptr<VolumeIntegration> m_scanner;
+    ActuatorTcpServer *m_actuatorServer = nullptr;
     bool m_initialized = false;
     bool m_running = false;
     mutable QMutex m_mutex;

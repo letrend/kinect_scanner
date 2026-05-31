@@ -9,6 +9,8 @@ class QDoubleSpinBox;
 class QSpinBox;
 class QCheckBox;
 class QGroupBox;
+class QComboBox;
+class QLineEdit;
 
 /// Builds a form of widgets bound to every field of ScanParameters, debouncing
 /// changes for 100 ms before emitting parametersChanged().
@@ -38,6 +40,7 @@ private slots:
 
 private:
     QGroupBox *buildVolumeGroup();
+    QGroupBox *buildPoseSourceGroup();
     QGroupBox *buildTsdfGroup();
     QGroupBox *buildBilateralGroup();
     QGroupBox *buildRaycastGroup();
@@ -49,6 +52,36 @@ private:
     bool m_volumeDirty = false;
     bool m_loading = false;
 
+    // Pose source / simulation
+    QComboBox      *m_poseSource = nullptr;
+    QLineEdit      *m_simStlPath = nullptr;
+    QDoubleSpinBox *m_angleStart = nullptr;
+    QDoubleSpinBox *m_angleEnd = nullptr;
+    QDoubleSpinBox *m_angleStep = nullptr;
+    QDoubleSpinBox *m_stageStart = nullptr;
+    QDoubleSpinBox *m_stageEnd = nullptr;
+    QDoubleSpinBox *m_stageStep = nullptr;
+    QSpinBox       *m_framesPerPose = nullptr;
+    QDoubleSpinBox *m_targetSettle = nullptr;
+    QDoubleSpinBox *m_angleTolerance = nullptr;
+    QDoubleSpinBox *m_stageTolerance = nullptr;
+    QDoubleSpinBox *m_targetTimeout = nullptr;
+    QDoubleSpinBox *m_turntableRadius = nullptr;
+    QDoubleSpinBox *m_turntableHeight = nullptr;
+    QDoubleSpinBox *m_kinectX = nullptr;
+    QDoubleSpinBox *m_kinectY = nullptr;
+    QDoubleSpinBox *m_kinectZ = nullptr;
+    QDoubleSpinBox *m_kinectRoll = nullptr;
+    QDoubleSpinBox *m_kinectPitch = nullptr;
+    QDoubleSpinBox *m_kinectYaw = nullptr;
+    QDoubleSpinBox *m_stageAxisX = nullptr;
+    QDoubleSpinBox *m_stageAxisY = nullptr;
+    QDoubleSpinBox *m_stageAxisZ = nullptr;
+    QLineEdit      *m_actuatorHost = nullptr;
+    QSpinBox       *m_actuatorPort = nullptr;
+    QDoubleSpinBox *m_depthNoise = nullptr;
+    QDoubleSpinBox *m_dropout = nullptr;
+
     // Volume
     QSpinBox       *m_xDim = nullptr;
     QSpinBox       *m_yDim = nullptr;
@@ -59,6 +92,7 @@ private:
     QDoubleSpinBox *m_offsetZ = nullptr;
     // TSDF
     QDoubleSpinBox *m_maxTrunc = nullptr;
+    QDoubleSpinBox *m_depthEdge = nullptr;
     // Bilateral
     QDoubleSpinBox *m_sigmaD = nullptr;
     QDoubleSpinBox *m_sigmaR = nullptr;

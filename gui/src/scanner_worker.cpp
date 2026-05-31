@@ -1,14 +1,21 @@
 #include "scanner_worker.hpp"
+#include "simulated_frame_source.hpp"
 
 #include <QCoreApplication>
 #include <QDebug>
 #include <QEventLoop>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QThread>
 #include <QTimer>
+#include <QVector>
 #include <QtMath>
 
 #include <cuda_runtime.h>
+
+#include <algorithm>
+#include <cmath>
+#include <stdexcept>
 
 namespace {
 
@@ -57,9 +64,65 @@ QMatrix4x4 eigenToQMatrix(const Eigen::Matrix4f &m) {
     return q;
 }
 
+bool hasDepthSamples(const cv::Mat &depth) {
+    if (depth.empty()) return false;
+    const int stepY = std::max(1, depth.rows / 64);
+    const int stepX = std::max(1, depth.cols / 64);
+    for (int y = 0; y < depth.rows; y += stepY) {
+        const float *row = depth.ptr<float>(y);
+        for (int x = 0; x < depth.cols; x += stepX) {
+            if (row[x] > 0.0f)
+                return true;
+        }
+    }
+    return false;
+}
+
+float wrappedAngleErrorDeg(float a, float b) {
+    float d = std::fmod(a - b + 180.0f, 360.0f);
+    if (d < 0.0f) d += 360.0f;
+    return std::fabs(d - 180.0f);
+}
+
+bool targetReached(const ScanParameters &p, const ActuatorState &state,
+                   float targetAngleDeg, float targetStageMm) {
+    if (!state.valid || state.moving)
+        return false;
+    return wrappedAngleErrorDeg(state.turntableAngleDeg, targetAngleDeg) <= p.angleToleranceDeg &&
+           std::fabs(state.linearStageMm - targetStageMm) <= p.stageToleranceMm;
+}
+
+Eigen::Matrix3f lookAtOriginRotation(const Eigen::Vector3f &cameraPosition) {
+    Eigen::Vector3f forward = -cameraPosition;
+    if (forward.norm() < 1e-6f)
+        forward = Eigen::Vector3f(0.0f, 0.0f, 1.0f);
+    forward.normalize();
+
+    Eigen::Vector3f downRef(0.0f, 1.0f, 0.0f);
+    Eigen::Vector3f down = downRef - forward * downRef.dot(forward);
+    if (down.norm() < 1e-6f) {
+        downRef = Eigen::Vector3f(0.0f, 0.0f, 1.0f);
+        down = downRef - forward * downRef.dot(forward);
+    }
+    down.normalize();
+
+    Eigen::Vector3f right = down.cross(forward);
+    right.normalize();
+    down = forward.cross(right);
+    down.normalize();
+
+    Eigen::Matrix3f rotation;
+    rotation.col(0) = right;
+    rotation.col(1) = down;
+    rotation.col(2) = forward;
+    return rotation;
+}
+
 } // namespace
 
-ScannerWorker::ScannerWorker(QObject *parent) : QObject(parent) {}
+ScannerWorker::ScannerWorker(QObject *parent) : QObject(parent) {
+    qRegisterMetaType<ActuatorState>("ActuatorState");
+}
 
 ScannerWorker::~ScannerWorker() {
     if (m_scanner) m_scanner->requestStop();
@@ -103,8 +166,43 @@ void ScannerWorker::initialize(ScanParameters params) {
         // still holding it (which causes the next grid-init to see no
         // valid depth).
         m_scanner.reset();
+        if (m_actuatorServer) {
+            delete m_actuatorServer;
+            m_actuatorServer = nullptr;
+        }
+
+        std::shared_ptr<FrameSource> source;
+        QVector<float> simVerts;
+        QVector<unsigned char> simColors;
+        QVector<unsigned int> simIndices;
+        if (params.poseSource == PoseSourceSimulation || params.simulationEnabled) {
+            std::shared_ptr<SimulatedFrameSource> sim(new SimulatedFrameSource(params));
+            emit statusMessage(QString("Simulation source: %1").arg(sim->sourceName()));
+            sim->exportPreviewMesh(simVerts, simColors, simIndices);
+            source = sim;
+            params.poseSource = PoseSourceSimulation;
+            params.simulationEnabled = true;
+            params.useDisplay = false;
+        }
+        if (params.poseSource == PoseSourceActuatedTcp) {
+            params.poseSource = PoseSourceActuatedTcp;
+            params.actuatorTcpEnabled = true;
+            params.useDisplay = false;
+            m_actuatorServer = new ActuatorTcpServer(this);
+            connect(m_actuatorServer, &ActuatorTcpServer::statusMessage,
+                    this, &ScannerWorker::statusMessage);
+            connect(m_actuatorServer, &ActuatorTcpServer::protocolError,
+                    this, &ScannerWorker::statusMessage);
+            QString actuatorError;
+            if (!m_actuatorServer->start(QString::fromStdString(params.actuatorTcpHost),
+                                         params.actuatorTcpPort, &actuatorError)) {
+                throw std::runtime_error(QString("Actuator TCP failed: %1")
+                                         .arg(actuatorError).toStdString());
+            }
+        }
         m_scanner.reset(new VolumeIntegration(params.xDim, params.yDim,
-                                              params.zDim, params.voxelSize));
+                                              params.zDim, params.voxelSize,
+                                              source));
         m_scanner->setParameters(params);
         m_scanner->setOnFrame([this](const FrameBundle &fb) {
             emitFromBundle(fb);
@@ -114,6 +212,7 @@ void ScannerWorker::initialize(ScanParameters params) {
         });
         m_initialized = true;
         emit initialized(params);
+        emit simulationMeshReady(simVerts, simColors, simIndices);
         emit statusMessage("Scanner initialized");
     } catch (const std::exception &e) {
         emit error(QString("Scanner init failed: %1").arg(e.what()));
@@ -132,6 +231,20 @@ void ScannerWorker::start() {
     emit scanStarted();
     emit statusMessage("Starting scan...");
 
+    if (m_scanner->getParameters().poseSource == PoseSourceSimulation) {
+        runSimulationLoop();
+        m_running = false;
+        emit scanStopped();
+        return;
+    }
+
+    if (m_scanner->getParameters().poseSource == PoseSourceActuatedTcp) {
+        runActuatedLoop();
+        m_running = false;
+        emit scanStopped();
+        return;
+    }
+
     // First-time: position the volume centroid based on current depth.
     if (m_scanner->frameCount() == 0) {
         emit statusMessage("Waiting for Kinect frames to settle...");
@@ -148,6 +261,181 @@ void ScannerWorker::start() {
 
     m_running = false;
     emit scanStopped();
+}
+
+static QVector<float> makeSweep(float start, float end, float step) {
+    QVector<float> values;
+    if (std::fabs(step) < 1e-6f || std::fabs(end - start) < 1e-6f) {
+        values.append(start);
+        return values;
+    }
+    const bool increasing = end > start;
+    if ((increasing && step < 0.0f) || (!increasing && step > 0.0f))
+        step = -step;
+    int guard = 0;
+    for (float v = start; guard++ < 10000; v += step) {
+        if (increasing) {
+            if (v >= end) break;
+        } else {
+            if (v <= end) break;
+        }
+        values.append(v);
+    }
+    if (values.empty())
+        values.append(start);
+    return values;
+}
+
+void ScannerWorker::runSimulationLoop() {
+    ScanParameters p = m_scanner->getParameters();
+    QVector<float> stages = makeSweep(p.stageStartMm, p.stageEndMm, p.stageStepMm);
+    QVector<float> angles = makeSweep(p.angleStartDeg, p.angleEndDeg, p.angleStepDeg);
+    emit statusMessage(QString("Simulation scan: %1 stage(s), %2 angle(s)")
+                       .arg(stages.size()).arg(angles.size()));
+
+    Eigen::Matrix4f firstPose = poseForTarget(p, angles.front(), stages.front());
+    m_scanner->setExternalPose(firstPose);
+    if (m_scanner->frameCount() == 0) {
+        emit statusMessage("Initializing simulated volume...");
+        if (!m_scanner->intializeGridPosition()) {
+            emit error("Could not initialize simulated grid position.");
+            return;
+        }
+    }
+
+    int framesPerPose = std::max(1, p.framesPerPose);
+    for (float stage : stages) {
+        for (float angle : angles) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+            if (!m_running) return;
+            while (m_scanner->isPaused() && m_running) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+                QThread::msleep(20);
+            }
+            if (!m_running) return;
+            Eigen::Matrix4f targetPose = poseForTarget(p, angle, stage);
+            m_scanner->setExternalPose(targetPose);
+            for (int i = 0; i < framesPerPose; ++i) {
+                if (!m_scanner->stepOnce()) {
+                    emit error("Simulation frame integration failed.");
+                    return;
+                }
+            }
+        }
+    }
+    emit statusMessage("Simulation scan complete.");
+}
+
+bool ScannerWorker::waitForActuatorTarget(const ScanParameters &p, float angleDeg,
+                                          float stageMm, ActuatorState *state) {
+    if (!m_actuatorServer)
+        return false;
+
+    QElapsedTimer totalTimer;
+    totalTimer.start();
+    QElapsedTimer settleTimer;
+    bool settling = false;
+    const qint64 timeoutMs = std::max<qint64>(1, (qint64)p.targetTimeoutMs);
+    const qint64 settleMs = std::max<qint64>(0, (qint64)p.targetSettleMs);
+
+    while (m_running && totalTimer.elapsed() < timeoutMs) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        const ActuatorState current = m_actuatorServer->state();
+        if (targetReached(p, current, angleDeg, stageMm)) {
+            if (!settling) {
+                settling = true;
+                settleTimer.start();
+            }
+            if (settleTimer.elapsed() >= settleMs) {
+                if (state) *state = current;
+                return true;
+            }
+        } else {
+            settling = false;
+        }
+        QThread::msleep(10);
+    }
+    return false;
+}
+
+void ScannerWorker::runActuatedLoop() {
+    if (!m_actuatorServer || !m_actuatorServer->isListening()) {
+        emit error("Actuated TCP mode selected, but the actuator TCP server is not listening.");
+        return;
+    }
+
+    ScanParameters p = m_scanner->getParameters();
+    QVector<float> stages = makeSweep(p.stageStartMm, p.stageEndMm, p.stageStepMm);
+    QVector<float> angles = makeSweep(p.angleStartDeg, p.angleEndDeg, p.angleStepDeg);
+    emit statusMessage(QString("Actuated TCP scan: %1 stage(s), %2 angle(s)")
+                       .arg(stages.size()).arg(angles.size()));
+
+    const qint64 timeoutMs = std::max<qint64>(1, (qint64)p.targetTimeoutMs);
+    if (!m_actuatorServer->hasClients()) {
+        emit statusMessage("Waiting for actuator TCP client...");
+        QElapsedTimer clientTimer;
+        clientTimer.start();
+        while (m_running && !m_actuatorServer->hasClients() &&
+               clientTimer.elapsed() < timeoutMs) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+            QThread::msleep(20);
+        }
+        if (!m_actuatorServer->hasClients()) {
+            emit error("No actuator TCP client connected before timeout.");
+            return;
+        }
+    }
+
+    int framesPerPose = std::max(1, p.framesPerPose);
+    for (float stage : stages) {
+        for (float angle : angles) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+            if (!m_running) return;
+            while (m_scanner->isPaused() && m_running) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+                QThread::msleep(20);
+            }
+            if (!m_running) return;
+
+            m_actuatorServer->sendTarget(angle, stage);
+            ActuatorState reachedState;
+            if (!waitForActuatorTarget(p, angle, stage, &reachedState)) {
+                emit error(QString("Actuator target timed out: angle %1 deg, stage %2 mm")
+                           .arg(angle, 0, 'f', 2).arg(stage, 0, 'f', 2));
+                return;
+            }
+
+            m_scanner->setExternalPose(
+                poseForTarget(p, reachedState.turntableAngleDeg, reachedState.linearStageMm));
+
+            if (m_scanner->frameCount() == 0) {
+                emit statusMessage("Initializing actuated volume...");
+                if (!m_scanner->intializeGridPosition()) {
+                    emit error("Could not initialize actuated grid position (no valid depth).");
+                    return;
+                }
+                emit statusMessage("Grid position locked");
+            }
+
+            for (int i = 0; i < framesPerPose; ++i) {
+                if (!m_running) return;
+                while (m_scanner->isPaused() && m_running) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+                    QThread::msleep(20);
+                }
+                ActuatorState current = m_actuatorServer->state();
+                if (current.valid) {
+                    m_scanner->setExternalPose(
+                        poseForTarget(p, current.turntableAngleDeg, current.linearStageMm));
+                }
+                if (!m_scanner->stepOnce()) {
+                    emit error("Actuated frame integration failed.");
+                    return;
+                }
+            }
+        }
+    }
+    emit statusMessage("Actuated TCP scan complete.");
 }
 
 void ScannerWorker::runLoop() {
@@ -180,6 +468,7 @@ void ScannerWorker::setPaused(bool paused) {
 void ScannerWorker::stop() {
     m_running = false;
     if (m_scanner) m_scanner->requestStop();
+    if (m_actuatorServer) m_actuatorServer->sendStop();
 }
 
 void ScannerWorker::reset() {
@@ -206,14 +495,23 @@ void ScannerWorker::reset() {
 
 void ScannerWorker::applyParameters(ScanParameters params) {
     if (!m_scanner) return;
-    // Volume dim & voxel size only take effect on reset; keep current values
-    // so the live integration isn't broken.
     ScanParameters cur = m_scanner->getParameters();
-    params.xDim      = cur.xDim;
-    params.yDim      = cur.yDim;
-    params.zDim      = cur.zDim;
-    params.voxelSize = cur.voxelSize;
     params.useDisplay = false;
+
+    const bool sourceChanged =
+        params.poseSource != cur.poseSource ||
+        params.simStlPath != cur.simStlPath ||
+        params.actuatorTcpHost != cur.actuatorTcpHost ||
+        params.actuatorTcpPort != cur.actuatorTcpPort;
+    if (sourceChanged) {
+        if (m_running) {
+            emit error("Stop the scan before changing pose source, STL, or actuator TCP endpoint.");
+            return;
+        }
+        initialize(params);
+        return;
+    }
+
     m_scanner->setParameters(params);
 }
 
@@ -292,6 +590,37 @@ void ScannerWorker::calibrate() {
     emit statusMessage(ok ? "Calibration finished" : "Calibration failed");
 }
 
+Eigen::Matrix4f ScannerWorker::poseForTarget(const ScanParameters &p, float angleDeg, float stageMm) const {
+    const float mm = 0.001f;
+    Eigen::Vector3f t(p.kinectOffsetXMm * mm,
+                      p.kinectOffsetYMm * mm,
+                      p.kinectOffsetZMm * mm);
+    Eigen::Vector3f axis(p.stageAxisX, p.stageAxisY, p.stageAxisZ);
+    if (axis.norm() < 1e-6f)
+        axis = Eigen::Vector3f(0.0f, -1.0f, 0.0f);
+    axis.normalize();
+    t += axis * (stageMm * mm);
+
+    const float pi = 3.14159265358979323846f;
+    const float roll = p.kinectRollDeg * pi / 180.0f;
+    const float pitch = p.kinectPitchDeg * pi / 180.0f;
+    const float yaw = p.kinectYawDeg * pi / 180.0f;
+    Eigen::Matrix3f rx = Eigen::AngleAxisf(roll, Eigen::Vector3f::UnitX()).toRotationMatrix();
+    Eigen::Matrix3f ry = Eigen::AngleAxisf(pitch, Eigen::Vector3f::UnitY()).toRotationMatrix();
+    Eigen::Matrix3f rz = Eigen::AngleAxisf(yaw, Eigen::Vector3f::UnitZ()).toRotationMatrix();
+
+    Eigen::Matrix4f mount = Eigen::Matrix4f::Identity();
+    const Eigen::Matrix3f correction = rz * ry * rx;
+    mount.block<3,3>(0,0) = lookAtOriginRotation(t) * correction;
+    mount.block<3,1>(0,3) = t;
+
+    const float theta = -angleDeg * pi / 180.0f;
+    Eigen::Matrix4f turntableInv = Eigen::Matrix4f::Identity();
+    turntableInv.block<3,3>(0,0) =
+        Eigen::AngleAxisf(theta, Eigen::Vector3f::UnitY()).toRotationMatrix();
+    return turntableInv * mount;
+}
+
 void ScannerWorker::emitFromBundle(const FrameBundle &fb) {
     // 2D panels
     QImage rgb         = matBGRf32_to_rgb888(fb.rgb);
@@ -302,14 +631,23 @@ void ScannerWorker::emitFromBundle(const FrameBundle &fb) {
     emit frameReady(rgb, depth, raycastRgb, raycastDep, pose, fb.fps,
                     (quint64)fb.frameIndex);
 
-    // 3D point cloud: back-project raycast depth+RGB through Kinect intrinsics.
-    if (!fb.raycastDepth.empty() && !fb.raycastRGB.empty() && m_scanner) {
-        const float fx = m_scanner->kinect()->irCameraParams.fx;
-        const float fy = m_scanner->kinect()->irCameraParams.fy;
-        const float cx = m_scanner->kinect()->irCameraParams.cx;
-        const float cy = m_scanner->kinect()->irCameraParams.cy;
-        const int W = fb.raycastDepth.cols;
-        const int H = fb.raycastDepth.rows;
+    // 3D point cloud: prefer the TSDF raycast, but fall back to live depth so
+    // simulation shows the object immediately even before the model raycast has
+    // enough integrated data.
+    const cv::Mat *cloudDepth = &fb.raycastDepth;
+    const cv::Mat *cloudRgb = &fb.raycastRGB;
+    if (!hasDepthSamples(*cloudDepth) || cloudRgb->empty()) {
+        cloudDepth = &fb.depthMM;
+        cloudRgb = &fb.rgb;
+    }
+    if (!cloudDepth->empty() && !cloudRgb->empty() && m_scanner) {
+        const CameraIntrinsics ci = m_scanner->cameraIntrinsics();
+        const float fx = ci.fx;
+        const float fy = ci.fy;
+        const float cx = ci.cx;
+        const float cy = ci.cy;
+        const int W = cloudDepth->cols;
+        const int H = cloudDepth->rows;
         QVector<float> xyz;
         QVector<unsigned char> rgb8;
         // Downsample for performance: every other pixel.
@@ -317,8 +655,8 @@ void ScannerWorker::emitFromBundle(const FrameBundle &fb) {
         xyz.reserve((W/step) * (H/step) * 3);
         rgb8.reserve((W/step) * (H/step) * 3);
         for (int y = 0; y < H; y += step) {
-            const float *dRow = fb.raycastDepth.ptr<float>(y);
-            const float *cRow = fb.raycastRGB.ptr<float>(y);
+            const float *dRow = cloudDepth->ptr<float>(y);
+            const float *cRow = cloudRgb->ptr<float>(y);
             for (int x = 0; x < W; x += step) {
                 float zmm = dRow[x];
                 if (zmm <= 0.0f) continue;

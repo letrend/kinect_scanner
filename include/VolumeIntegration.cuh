@@ -6,7 +6,7 @@
 #define EIGEN_DONT_ALIGN_STATICALLY
 #include <Eigen/Dense>
 #include "marching_cubes.hpp"
-#include "kinect.hpp"
+#include "frame_source.hpp"
 #include "icp_wrapper.hpp"
 #include "calibration.hpp"
 #include "scan_parameters.hpp"
@@ -57,6 +57,7 @@ __constant__ float c_domainKernel[1000];
 __global__ void deviceCalculateLocalCoordinates(float *d_depth, float3 *d_v, size_t pWidth, size_t pHeight);
 __global__ void deviceCalculateLocalNormals(float3 *d_v, float3 *d_normals, size_t w, size_t h, float normalThreshold);
 __global__ void deviceCalculateTSDF(float *d_depth, float *d_color, float3 *d_normals, size_t pWidth, size_t pHeight, float maxTruncation,
+                                    float depthEdgeThreshold,
                                     float *d_voxelTSDF, float *d_voxelWeight, float *d_voxelWeightColor, unsigned char *d_voxelRed, unsigned char *d_voxelGreen,
                                     unsigned char *d_voxelBlue, float voxelSize, size_t vWidth, size_t vHeight, size_t slice);
 __global__ void bilateralFilterKernel(float *img, float *res, int img_width, int img_height,
@@ -75,7 +76,8 @@ __global__ void deviceRaycast(float *d_voxelTSDF, float *d_depthModel, unsigned 
 
 class VolumeIntegration{
 public:
-    VolumeIntegration(uint xDim=400, uint yDim=400, uint zDim=400, float voxelsize=0.01f);
+    VolumeIntegration(uint xDim=400, uint yDim=400, uint zDim=400, float voxelsize=0.01f,
+                      std::shared_ptr<FrameSource> frameSource=nullptr);
     ~VolumeIntegration();
     /**
      * Initializes the voxel grid position depending on the depth data.
@@ -113,6 +115,7 @@ public:
      */
     void setParameters(const ScanParameters &p);
     ScanParameters getParameters() const;
+    void setExternalPose(const Eigen::Matrix4f &externalPose);
     /**
      * Callback installed by the GUI worker. Invoked once per stepOnce() with
      * deep-copied cv::Mats. Pass an empty std::function to disable.
@@ -146,7 +149,7 @@ public:
     const unsigned char* hostGreen() const { return green; }
     const unsigned char* hostBlue()  const { return blue; }
     const MarchingCubes* mesh() const { return mc; }
-    MyFreenectDevice* kinect() { return device; }
+    CameraIntrinsics cameraIntrinsics() const { return m_cameraIntrinsics; }
 
 private:
     void domainKernel(float *kernel, int cols, int rows, float sigma_d);
@@ -182,8 +185,9 @@ private:
     //! FPS smoothing
     double m_lastFrameTimeSec = 0.0;
     float  m_fps = 0.0f;
-    //! kinect device
-    MyFreenectDevice *device;
+    //! depth/RGB frame source
+    std::shared_ptr<FrameSource> m_frameSource;
+    CameraIntrinsics m_cameraIntrinsics;
     //! savePath
     string dataFolder;
     //! input image size and color channels
@@ -230,6 +234,8 @@ private:
     //! camera pose
     Eigen::Matrix4f pose;
     Eigen::Matrix4f pose_inv;
+    Eigen::Matrix4f m_externalPose;
+    bool m_externalPoseValid = false;
 
     //! voxel grid location
     float gridLocation[3];

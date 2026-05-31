@@ -1,6 +1,13 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
+
+enum PoseSource {
+    PoseSourceIcp = 0,
+    PoseSourceActuatedTcp = 1,
+    PoseSourceSimulation = 2
+};
 
 /**
  * POD struct with every user-tunable scan parameter.
@@ -8,6 +15,9 @@
  * (under a mutex) so the GUI can mutate it on another thread.
  */
 struct ScanParameters {
+    // ---- Pose source ----
+    int poseSource = PoseSourceIcp;
+
     // ---- Volume (require reset to apply) ----
     unsigned int xDim      = 400;
     unsigned int yDim      = 400;
@@ -26,6 +36,7 @@ struct ScanParameters {
 
     // ---- TSDF ----
     float maxTruncation = 0.03f;      // meters
+    float depthEdgeThreshold = 0.02f; // meters; 0 disables silhouette rejection
 
     // ---- Bilateral filter ----
     float sigma_d = 5.0f;             // spatial sigma (kernel size derived; reset to apply)
@@ -48,6 +59,52 @@ struct ScanParameters {
 
     // ---- Marching cubes ----
     float isoValue = 0.0f;
+
+    // ---- Actuated scan path ----
+    float angleStartDeg = 0.0f;
+    float angleEndDeg = 360.0f;
+    float angleStepDeg = 10.0f;
+    float stageStartMm = 0.0f;
+    float stageEndMm = 0.0f;
+    float stageStepMm = 25.0f;
+    int   framesPerPose = 1;
+    float targetSettleMs = 100.0f;
+    float angleToleranceDeg = 0.5f;
+    float stageToleranceMm = 1.0f;
+    float targetTimeoutMs = 10000.0f;
+
+    // ---- Turntable / sensor geometry ----
+    float turntableRadiusMm = 150.0f;
+    float turntableHeightMm = 40.0f;
+    float kinectOffsetXMm = 0.0f;
+    float kinectOffsetYMm = -150.0f;
+    float kinectOffsetZMm = -1000.0f;
+    float kinectRollDeg = 0.0f;
+    float kinectPitchDeg = 0.0f;
+    float kinectYawDeg = 0.0f;
+    float stageAxisX = 0.0f;
+    float stageAxisY = -1.0f;
+    float stageAxisZ = 0.0f;
+
+    // ---- Simulation ----
+    bool simulationEnabled = false;
+    bool simulationAutoStart = false;
+    std::string simStlPath;
+    float simStlScale = 1.0f;            // STL units -> mm
+    bool simAutoCenter = true;
+    bool simRenderTurntable = true;
+    float simDepthNoiseMm = 0.0f;
+    float simDropoutPercent = 0.0f;
+    float simRaycastNearMm = 100.0f;
+    float simRaycastFarMm = 4000.0f;
+
+    // ---- TCP control ----
+    bool controlTcpEnabled = true;
+    std::string controlTcpHost = "127.0.0.1";
+    int controlTcpPort = 5056;
+    bool actuatorTcpEnabled = false;
+    std::string actuatorTcpHost = "0.0.0.0";
+    int actuatorTcpPort = 5055;
 
     // ---- Display gating ----
     bool useDisplay = true;           // false => no cv::imshow/waitKey

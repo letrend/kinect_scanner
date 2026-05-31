@@ -7,6 +7,9 @@ set(GUI_SOURCES
     src/gui_entry.cpp
     src/main_window.cpp
     src/scanner_worker.cpp
+    src/actuator_tcp_server.cpp
+    src/simulated_frame_source.cpp
+    src/tcp_control_server.cpp
     src/parameter_panel.cpp
     src/image_panel.cpp
     src/viewer3d.cpp
@@ -17,6 +20,9 @@ set(GUI_HEADERS
     include/gui_entry.hpp
     src/main_window.hpp
     src/scanner_worker.hpp
+    src/actuator_tcp_server.hpp
+    src/simulated_frame_source.hpp
+    src/tcp_control_server.hpp
     src/parameter_panel.hpp
     src/image_panel.hpp
     src/viewer3d.hpp
@@ -39,7 +45,7 @@ target_include_directories(kinect_scanner_gui
 )
 
 target_link_libraries(kinect_scanner_gui
-    PUBLIC  Qt5::Core Qt5::Gui Qt5::Widgets Qt5::OpenGL
+    PUBLIC  Qt5::Core Qt5::Gui Qt5::Widgets Qt5::OpenGL Qt5::Network
     PRIVATE ${OpenCV_LIBS}
 )
 
