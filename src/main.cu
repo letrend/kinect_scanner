@@ -31,12 +31,17 @@ int main(int argc, char *argv[]) {
 		} else if (std::strcmp(argv[i], "--gui") == 0) {
 			useGui = true;
 		} else if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
-			std::printf("Usage: %s [--gui|--cli] [--simulate|--actuated] [--sim-stl PATH]\n"
+			std::printf("Usage: %s [--gui|--cli] [--simulate|--actuated|--benchmark] [--sim-stl PATH]\n"
 			            "  --gui   Launch the Qt GUI (default)\n"
 			            "  --cli   Run the legacy ncurses/OpenCV CLI\n"
 			            "  --simulate       Launch GUI with simulated Kinect/turntable\n"
 			            "  --actuated       Launch GUI with actuator TCP pose source\n"
+			            "  --benchmark      Launch GUI configured for simulation benchmark\n"
 			            "  --sim-stl PATH   STL model for simulation\n"
+			            "  --sim-scenario NAME      Simulation scenario\n"
+			            "  --sim-motion NAME        Benchmark motion preset\n"
+			            "  --sim-motion-path PATH   Benchmark pose script JSON\n"
+			            "  --sim-report PATH        Benchmark report JSON path\n"
 			            "  --control-tcp [HOST:]PORT  UI control TCP endpoint\n"
 			            "  --actuator-tcp [HOST:]PORT Actuator TCP endpoint\n",
 			            argv[0]);

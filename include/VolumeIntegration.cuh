@@ -19,6 +19,30 @@
  * Bundle of host-side frame data emitted to the GUI via callback once per step.
  * Mats are deep-copied owners so the GUI can hold them on another thread.
  */
+enum TrackingState {
+    TrackingStateTracking = 0,
+    TrackingStateLost = 1,
+    TrackingStateRecovering = 2,
+    TrackingStateRecovered = 3
+};
+
+struct TrackingDiagnostics {
+    int state = TrackingStateTracking;
+    float icpResidual = 0.0f;
+    float icpInlierRatio = 0.0f;
+    float icpTranslationStep = 0.0f;
+    float icpRotationStepDeg = 0.0f;
+    int lostFrames = 0;
+    int recoveryAttempts = 0;
+    float bestRecoveryScore = 0.0f;
+    std::string rejectionReason;
+    bool hasGroundTruth = false;
+    Eigen::Matrix4f groundTruthPose = Eigen::Matrix4f::Identity();
+    float poseErrorM = 0.0f;
+    float poseErrorRotDeg = 0.0f;
+    int benchmarkFrame = -1;
+};
+
 struct FrameBundle {
     cv::Mat rgb;            // CV_32FC3, 512x424, range [0,1]
     cv::Mat depthMM;        // CV_32FC1, depth in millimeters
@@ -27,6 +51,7 @@ struct FrameBundle {
     Eigen::Matrix4f pose = Eigen::Matrix4f::Identity();
     unsigned long long frameIndex = 0;
     float fps = 0.0f;
+    TrackingDiagnostics tracking;
 };
 
 #define STR1(x)  #x
@@ -57,7 +82,7 @@ __constant__ float c_domainKernel[1000];
 __global__ void deviceCalculateLocalCoordinates(float *d_depth, float3 *d_v, size_t pWidth, size_t pHeight);
 __global__ void deviceCalculateLocalNormals(float3 *d_v, float3 *d_normals, size_t w, size_t h, float normalThreshold);
 __global__ void deviceCalculateTSDF(float *d_depth, float *d_color, float3 *d_normals, size_t pWidth, size_t pHeight, float maxTruncation,
-                                    float depthEdgeThreshold,
+                                    float depthEdgeThreshold, float tsdfMaxWeight, int tsdfConflictDecay,
                                     float *d_voxelTSDF, float *d_voxelWeight, float *d_voxelWeightColor, unsigned char *d_voxelRed, unsigned char *d_voxelGreen,
                                     unsigned char *d_voxelBlue, float voxelSize, size_t vWidth, size_t vHeight, size_t slice);
 __global__ void bilateralFilterKernel(float *img, float *res, int img_width, int img_height,
@@ -69,7 +94,8 @@ __device__ __inline__ float deviceTriliniearInterpolation(unsigned char *d_voxel
 __device__ __inline__ float deviceTSDFBoundaryCheck(float *d_voxelTSDF, float3 location,
                                                     size_t vWidth, size_t vHeight, size_t slices);
 __device__ __inline__ float3 deviceGetVoxelGridCoordinates(float3 camera, float voxelSize);
-__global__ void deviceRaycast(float *d_voxelTSDF, float *d_depthModel, unsigned char *d_voxelRed, unsigned char *d_voxelGreen,
+__global__ void deviceRaycast(float *d_voxelTSDF, float *d_voxelWeight, float minVoxelWeight,
+                              float *d_depthModel, unsigned char *d_voxelRed, unsigned char *d_voxelGreen,
                               unsigned char *d_voxelBlue, size_t pWidth, size_t pHeight, size_t vWidth,
                               size_t vHeight, size_t slices, float voxelSize, float near, float far, float step, float *d_img);
 #endif
@@ -116,6 +142,11 @@ public:
     void setParameters(const ScanParameters &p);
     ScanParameters getParameters() const;
     void setExternalPose(const Eigen::Matrix4f &externalPose);
+    void setTrackingPose(const Eigen::Matrix4f &trackingPose);
+    void setBenchmarkGroundTruth(const Eigen::Matrix4f &groundTruthPose, int frameIndex);
+    void clearBenchmarkGroundTruth();
+    TrackingDiagnostics trackingDiagnostics() const { return m_tracking; }
+    bool forceGlobalRecovery();
     /**
      * Callback installed by the GUI worker. Invoked once per stepOnce() with
      * deep-copied cv::Mats. Pass an empty std::function to disable.
@@ -153,6 +184,23 @@ public:
 
 private:
     void domainKernel(float *kernel, int cols, int rows, float sigma_d);
+    void uploadCameraPoseSymbols(const Eigen::Matrix4f &cameraPoseWorld);
+    bool validateIcpResult(const ICPResult &result, const ScanParameters &p,
+                           bool recovery, std::string &reason) const;
+    bool raycastModelForPose(const Eigen::Matrix4f &candidatePose,
+                             float minVoxelWeight, cv::Mat &depthOut,
+                             cv::Mat *rgbOut = nullptr);
+    bool attemptGlobalRecovery(const ScanParameters &p, const cv::Mat &liveDepthMM);
+    Eigen::Matrix4f recoveryOrbitPose(const Eigen::Vector3f &center,
+                                      float yawDeg, float pitchDeg,
+                                      float radius) const;
+    std::vector<float> parseRadiusOffsets(const std::string &text) const;
+    float scoreDepthPair(const cv::Mat &modelDepthMM, const cv::Mat &liveDepthMM,
+                         float maxResidualM, float *inlierRatio,
+                         float *meanAbsResidualM) const;
+    float poseRotationErrorDeg(const Eigen::Matrix4f &a, const Eigen::Matrix4f &b) const;
+    void publishStatusOnce(const std::string &message);
+    bool fetchFrame();
 
     // opencv helpers
     void convert_layered_to_interleaved(float *aOut, const float *aIn, int w, int h, int nc);
@@ -185,6 +233,16 @@ private:
     //! FPS smoothing
     double m_lastFrameTimeSec = 0.0;
     float  m_fps = 0.0f;
+    //! tracking / recovery state
+    TrackingDiagnostics m_tracking;
+    int m_lostFrameCount = 0;
+    int m_recoveryAcceptedFrames = 0;
+    bool m_recoveringFromLoss = false;
+    double m_lastRecoveryAttemptSec = -1.0;
+    std::string m_lastStatusMessage;
+    bool m_hasBenchmarkGroundTruth = false;
+    Eigen::Matrix4f m_benchmarkGroundTruth = Eigen::Matrix4f::Identity();
+    int m_benchmarkFrame = -1;
     //! depth/RGB frame source
     std::shared_ptr<FrameSource> m_frameSource;
     CameraIntrinsics m_cameraIntrinsics;

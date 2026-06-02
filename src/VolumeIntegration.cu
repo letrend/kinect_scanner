@@ -1,5 +1,10 @@
 #include "VolumeIntegration.cuh"
 
+#include <algorithm>
+#include <cmath>
+#include <ctime>
+#include <limits>
+#include <sstream>
 #include <stdexcept>
 
 // cuda error checking
@@ -236,6 +241,38 @@ VolumeIntegration::~VolumeIntegration(){
     delete[] green;
     delete[] blue;
 }
+
+bool VolumeIntegration::fetchFrame(){
+    if(!m_frameSource->updateFrames())
+        return false;
+    m_frameSource->getDepthMM(depth1);
+    m_frameSource->getRgbMapped2Depth(color);
+
+    const bool depthOk = !depth1.empty() &&
+                         depth1.type() == CV_32FC1 &&
+                         depth1.cols == (int)pWidth &&
+                         depth1.rows == (int)pHeight;
+    const bool colorOk = !color.empty() &&
+                         color.type() == CV_32FC3 &&
+                         color.cols == (int)pWidth &&
+                         color.rows == (int)pHeight;
+    if (!depthOk || !colorOk) {
+        std::ostringstream ss;
+        ss << "Invalid Kinect frame";
+        if (!depthOk) {
+            ss << " depth=" << depth1.cols << "x" << depth1.rows
+               << " type=" << depth1.type();
+        }
+        if (!colorOk) {
+            ss << " color=" << color.cols << "x" << color.rows
+               << " type=" << color.type();
+        }
+        publishStatusOnce(ss.str());
+        return false;
+    }
+    return true;
+}
+
 bool VolumeIntegration::intializeGridPosition(){
     const bool useDisplay = getParameters().useDisplay;
     if (useDisplay) {
@@ -248,10 +285,8 @@ bool VolumeIntegration::intializeGridPosition(){
     while (true) {
         if (m_stopRequested.load())
             return false;
-        if(!m_frameSource->updateFrames())
+        if(!fetchFrame())
             continue;
-        m_frameSource->getDepthMM(depth1);
-        m_frameSource->getRgbMapped2Depth(color);
 
         if (useDisplay) {
             cv::imshow("color", color);
@@ -493,7 +528,7 @@ __global__ void deviceCalculateLocalNormals(float3 *d_v, float3 *d_normals, size
 }
 
 __global__ void deviceCalculateTSDF(float *d_depth, float *d_color, float3 *d_normals, size_t pWidth, size_t pHeight, float maxTruncation,
-                                    float depthEdgeThreshold,
+                                    float depthEdgeThreshold, float tsdfMaxWeight, int tsdfConflictDecay,
                                     float *d_voxelTSDF, float *d_voxelWeight, float *d_voxelWeightColor, unsigned char *d_voxelRed, unsigned char *d_voxelGreen,
                                     unsigned char *d_voxelBlue, float voxelSize, size_t vWidth, size_t vHeight, size_t slice)
 {
@@ -635,9 +670,14 @@ __global__ void deviceCalculateTSDF(float *d_depth, float *d_color, float3 *d_no
                 normalWeight = fmaxf(0.05f, normalWeight);
 
                 float oldWeight = d_voxelWeight[ind_voxel];
+                float oldTsdf = d_voxelTSDF[ind_voxel];
+                if(tsdfConflictDecay && oldWeight > 0.0f && fabsf(oldTsdf - tsdf) > 0.75f) {
+                    oldWeight = fmaxf(0.0f, oldWeight - 2.0f * normalWeight);
+                }
                 float newWeight = normalWeight;
-                float weight = oldWeight + newWeight;
-                float invWeight = 1.0f / weight;
+                float rawWeight = oldWeight + newWeight;
+                float weight = (tsdfMaxWeight > 0.0f) ? fminf(tsdfMaxWeight, rawWeight) : rawWeight;
+                float invWeight = 1.0f / rawWeight;
 
                 // calculate color weight
                 float oldWeightColor = d_voxelWeightColor[ind_voxel];
@@ -647,12 +687,13 @@ __global__ void deviceCalculateTSDF(float *d_depth, float *d_color, float3 *d_no
 #elif defined(TSDF_EXP_WEIGHTING)
                 newWeightColor *= expf(tsdfWeight);
 #endif
-                float weightColor = oldWeightColor + newWeightColor;
-                float invWeightColor = 1.0f / weightColor;
+                float rawWeightColor = oldWeightColor + newWeightColor;
+                float weightColor = (tsdfMaxWeight > 0.0f) ? fminf(tsdfMaxWeight, rawWeightColor) : rawWeightColor;
+                float invWeightColor = 1.0f / rawWeightColor;
 
                 // calculate tsdf and write it to global memory
                 if(newWeight > 0.0f && newWeight == newWeight) {
-                    d_voxelTSDF[ind_voxel]  = (d_voxelTSDF[ind_voxel]  * (float)oldWeight + tsdf  * (float)newWeight) *
+                    d_voxelTSDF[ind_voxel]  = (oldTsdf  * (float)oldWeight + tsdf  * (float)newWeight) *
                                               (float)invWeight;
 
                     d_voxelWeight[ind_voxel] = weight;
@@ -827,7 +868,8 @@ voxelgrid.z = (cglobal.z - voxelHalfSize) * inverseVoxelSize;
 return voxelgrid;
 }
 
-__global__ void deviceRaycast(float *d_voxelTSDF, float *d_depthModel, unsigned char *d_voxelRed, unsigned char *d_voxelGreen,
+__global__ void deviceRaycast(float *d_voxelTSDF, float *d_voxelWeight, float minVoxelWeight,
+                              float *d_depthModel, unsigned char *d_voxelRed, unsigned char *d_voxelGreen,
                               unsigned char *d_voxelBlue, size_t pWidth, size_t pHeight, size_t vWidth,
                               size_t vHeight, size_t slices, float voxelSize, float near, float far, float step, float *d_img)
 {
@@ -876,6 +918,12 @@ __global__ void deviceRaycast(float *d_voxelTSDF, float *d_depthModel, unsigned 
                 if (floorf(voxelgrid.x) >= 0 && ceilf(voxelgrid.x) < (float)vWidth &&
                     floorf(voxelgrid.y) >= 0 && ceilf(voxelgrid.y) < (float)vHeight &&
                     floorf(voxelgrid.z) >= 0 && ceilf(voxelgrid.z) < (float)slices) {
+                    if(minVoxelWeight > 0.0f) {
+                        float w = deviceTriliniearInterpolation(d_voxelWeight, voxelgrid, vWidth, vHeight, slices);
+                        if(w < minVoxelWeight) {
+                            continue;
+                        }
+                    }
                     d_img[ind_img + pWidth*pHeight*0] = deviceTriliniearInterpolation(d_voxelRed,
                                                                                       voxelgrid, vWidth, vHeight, slices);
                     d_img[ind_img + pWidth*pHeight*1] = deviceTriliniearInterpolation(d_voxelGreen,
@@ -901,6 +949,272 @@ __global__ void deviceRaycast(float *d_voxelTSDF, float *d_depthModel, unsigned 
             d_img[ind_img + pWidth*pHeight*2] = 0.0f;
         }
     }
+}
+
+void VolumeIntegration::uploadCameraPoseSymbols(const Eigen::Matrix4f &cameraPoseWorld) {
+    Eigen::Matrix4f inv = cameraPoseWorld.inverse();
+    for (int y = 0; y < 3; y++) {
+        for (int x = 0; x < 4; x++) {
+            size_t idx = x + 4 * y;
+            cameraPose[idx] = cameraPoseWorld(y, x);
+            cameraPose_inv[idx] = inv(y, x);
+        }
+    }
+    cudaMemcpyToSymbol(c_cameraPose, cameraPose, 4 * 3 * sizeof(float));
+    CUDA_CHECK;
+    cudaMemcpyToSymbol(c_cameraPose_inv, cameraPose_inv, 4 * 3 * sizeof(float));
+    CUDA_CHECK;
+}
+
+bool VolumeIntegration::validateIcpResult(const ICPResult &result, const ScanParameters &p,
+                                          bool recovery, std::string &reason) const {
+    if (!result.ok) {
+        reason = result.rejectionReason.empty() ? "invalid ICP result" : result.rejectionReason;
+        return false;
+    }
+    const float minInliers = recovery ? p.globalRecoveryMinInlierRatio : p.icpMinInlierRatio;
+    const float maxResidual = recovery ? p.globalRecoveryMaxResidual : p.icpMaxResidual;
+    if (result.inlierRatio < minInliers) {
+        std::ostringstream ss;
+        ss << "low inlier ratio " << result.inlierRatio;
+        reason = ss.str();
+        return false;
+    }
+    if (result.residual > maxResidual) {
+        std::ostringstream ss;
+        ss << "high residual " << result.residual;
+        reason = ss.str();
+        return false;
+    }
+    if (!recovery && result.translationStep > p.icpMaxTranslationStep) {
+        std::ostringstream ss;
+        ss << "large translation step " << result.translationStep;
+        reason = ss.str();
+        return false;
+    }
+    if (!recovery && result.rotationStepDeg > p.icpMaxRotationStepDeg) {
+        std::ostringstream ss;
+        ss << "large rotation step " << result.rotationStepDeg;
+        reason = ss.str();
+        return false;
+    }
+    reason.clear();
+    return true;
+}
+
+bool VolumeIntegration::raycastModelForPose(const Eigen::Matrix4f &candidatePose,
+                                            float minVoxelWeight, cv::Mat &depthOut,
+                                            cv::Mat *rgbOut) {
+    uploadCameraPoseSymbols(candidatePose);
+    cudaMemset(d_depthModel, 0, bytesFloat);
+    CUDA_CHECK;
+    cudaMemset(d_imgColorRayCast, 0, bytesFloatColor);
+    CUDA_CHECK;
+    ScanParameters p = getParameters();
+    deviceRaycast<<<grid, block>>>(d_voxelTSDF, d_voxelWeight, minVoxelWeight,
+            d_depthModel, d_voxelRed, d_voxelGreen, d_voxelBlue, pWidth, pHeight,
+            vWidth, vHeight, slices, voxelSize,
+            p.raycastNear, p.raycastFar, p.raycastStep,
+            d_imgColorRayCast);
+    CUDA_CHECK;
+    cudaDeviceSynchronize();
+    CUDA_CHECK;
+    cudaMemcpy(depthModel, d_depthModel, bytesFloat, cudaMemcpyDeviceToHost);
+    CUDA_CHECK;
+    depthOut.create((int)pHeight, (int)pWidth, CV_32FC1);
+    convert_layered_to_mat(depthOut, depthModel);
+    depthOut *= 1000.0f;
+    if (rgbOut) {
+        cudaMemcpy(imgColorRayCast, d_imgColorRayCast, bytesFloatColor, cudaMemcpyDeviceToHost);
+        CUDA_CHECK;
+        rgbOut->create((int)pHeight, (int)pWidth, CV_32FC3);
+        convert_layered_to_mat(*rgbOut, imgColorRayCast);
+    }
+    return cv::countNonZero(depthOut > 0.0f) > 0;
+}
+
+float VolumeIntegration::scoreDepthPair(const cv::Mat &modelDepthMM, const cv::Mat &liveDepthMM,
+                                        float maxResidualM, float *inlierRatio,
+                                        float *meanAbsResidualM) const {
+    int liveCount = 0;
+    int inliers = 0;
+    double absSumM = 0.0;
+    const float maxResidualMm = maxResidualM * 1000.0f;
+    for (int y = 0; y < liveDepthMM.rows; ++y) {
+        const float *live = liveDepthMM.ptr<float>(y);
+        const float *model = modelDepthMM.ptr<float>(y);
+        for (int x = 0; x < liveDepthMM.cols; ++x) {
+            if (live[x] <= 0.0f) continue;
+            ++liveCount;
+            if (model[x] <= 0.0f) continue;
+            const float err = std::fabs(model[x] - live[x]);
+            if (err <= maxResidualMm) {
+                ++inliers;
+                absSumM += err * 0.001;
+            }
+        }
+    }
+    const float ratio = liveCount > 0 ? float(inliers) / float(liveCount) : 0.0f;
+    const float mae = inliers > 0 ? float(absSumM / double(inliers)) : std::numeric_limits<float>::infinity();
+    if (inlierRatio) *inlierRatio = ratio;
+    if (meanAbsResidualM) *meanAbsResidualM = mae;
+    return ratio / (1.0f + (std::isfinite(mae) ? mae * 25.0f : 1000.0f));
+}
+
+std::vector<float> VolumeIntegration::parseRadiusOffsets(const std::string &text) const {
+    std::vector<float> values;
+    std::stringstream ss(text);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        try {
+            values.push_back(std::stof(item));
+        } catch (...) {
+        }
+    }
+    if (values.empty())
+        values.push_back(0.0f);
+    return values;
+}
+
+Eigen::Matrix4f VolumeIntegration::recoveryOrbitPose(const Eigen::Vector3f &center,
+                                                     float yawDeg, float pitchDeg,
+                                                     float radius) const {
+    const float pi = 3.14159265358979323846f;
+    const float yaw = yawDeg * pi / 180.0f;
+    const float pitch = pitchDeg * pi / 180.0f;
+    Eigen::Vector3f pos(center.x() + radius * std::cos(pitch) * std::sin(yaw),
+                        center.y() - radius * std::sin(pitch),
+                        center.z() - radius * std::cos(pitch) * std::cos(yaw));
+    Eigen::Vector3f forward = (center - pos).normalized();
+    Eigen::Vector3f worldUp(0.0f, -1.0f, 0.0f);
+    Eigen::Vector3f right = worldUp.cross(forward);
+    if (right.norm() < 1e-5f)
+        right = Eigen::Vector3f(1.0f, 0.0f, 0.0f);
+    right.normalize();
+    Eigen::Vector3f down = forward.cross(right).normalized();
+
+    Eigen::Matrix4f out = Eigen::Matrix4f::Identity();
+    out.block<3,1>(0,0) = right;
+    out.block<3,1>(0,1) = down;
+    out.block<3,1>(0,2) = forward;
+    out.block<3,1>(0,3) = pos;
+    return out;
+}
+
+float VolumeIntegration::poseRotationErrorDeg(const Eigen::Matrix4f &a, const Eigen::Matrix4f &b) const {
+    Eigen::Matrix3f d = a.block<3,3>(0,0).transpose() * b.block<3,3>(0,0);
+    float trace = std::max(-1.0f, std::min(3.0f, d.trace()));
+    float angle = std::acos(std::max(-1.0f, std::min(1.0f, (trace - 1.0f) * 0.5f)));
+    return angle * 180.0f / 3.14159265358979323846f;
+}
+
+void VolumeIntegration::publishStatusOnce(const std::string &message) {
+    if (message == m_lastStatusMessage)
+        return;
+    m_lastStatusMessage = message;
+    if (m_onStatus)
+        m_onStatus(message);
+}
+
+bool VolumeIntegration::attemptGlobalRecovery(const ScanParameters &p, const cv::Mat &liveDepthMM) {
+    if (!p.globalRecoveryEnabled || (int)m_frame.load() < p.globalRecoveryMinFrames)
+        return false;
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    const double now = ts.tv_sec + ts.tv_nsec * 1e-9;
+    if (m_lastRecoveryAttemptSec > 0.0 &&
+        (now - m_lastRecoveryAttemptSec) * 1000.0 < p.globalRecoveryCooldownMs)
+        return false;
+    m_lastRecoveryAttemptSec = now;
+
+    struct Candidate {
+        Eigen::Matrix4f pose;
+        float score = 0.0f;
+    };
+    std::vector<Candidate> candidates;
+    const Eigen::Vector3f center(gridLocation[0] + float(vWidth) * voxelSize * 0.5f,
+                                 gridLocation[1] + float(vHeight) * voxelSize * 0.5f,
+                                 gridLocation[2] + float(slices) * voxelSize * 0.5f);
+    float baseRadius = (pose.block<3,1>(0,3) - center).norm();
+    if (!std::isfinite(baseRadius) || baseRadius < 0.25f)
+        baseRadius = std::max(0.75f, p.gridInitOffsetZ);
+    std::vector<float> offsets = parseRadiusOffsets(p.globalRecoveryRadiusOffsetsM);
+
+    cv::Mat candidateDepth;
+    const float yawStep = std::max(1.0f, p.globalRecoveryYawStepDeg);
+    const float pitchStep = std::max(1.0f, p.globalRecoveryPitchStepDeg);
+    for (float yaw = 0.0f; yaw < 360.0f; yaw += yawStep) {
+        for (float pitch = p.globalRecoveryPitchMinDeg; pitch <= p.globalRecoveryPitchMaxDeg + 0.001f; pitch += pitchStep) {
+            for (float off : offsets) {
+                float radius = std::max(0.25f, baseRadius + off);
+                Eigen::Matrix4f candPose = recoveryOrbitPose(center, yaw, pitch, radius);
+                if (!raycastModelForPose(candPose, p.globalRecoveryMinVoxelWeight, candidateDepth, nullptr))
+                    continue;
+                float ratio = 0.0f, mae = 0.0f;
+                float score = scoreDepthPair(candidateDepth, liveDepthMM, p.globalRecoveryMaxResidual * 3.0f, &ratio, &mae);
+                if (ratio > 0.005f) {
+                    Candidate c;
+                    c.pose = candPose;
+                    c.score = score;
+                    candidates.push_back(c);
+                }
+            }
+        }
+    }
+    ++m_tracking.recoveryAttempts;
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate &a, const Candidate &b) {
+        return a.score > b.score;
+    });
+    if (candidates.empty()) {
+        m_tracking.bestRecoveryScore = 0.0f;
+        return false;
+    }
+    const int topCount = std::min<int>(std::max(1, p.globalRecoveryTopCandidates), candidates.size());
+    m_tracking.bestRecoveryScore = candidates.front().score;
+
+    Eigen::Matrix4d oldPose = icp->getPose();
+    float bestScore = -1.0f;
+    ICPResult bestResult;
+    std::string bestReason = "no recovery candidate accepted";
+    const float cutoff = p.icpDepthCutoff > 0.0f ? p.icpDepthCutoff : p.raycastFar;
+    for (int i = 0; i < topCount; ++i) {
+        cv::Mat modelDepth;
+        if (!raycastModelForPose(candidates[i].pose, p.globalRecoveryMinVoxelWeight, modelDepth, nullptr))
+            continue;
+        icp->setPose(candidates[i].pose.cast<double>());
+        ICPResult result = icp->getPoseFromDepth(modelDepth, const_cast<cv::Mat&>(liveDepthMM),
+                                                 cutoff, p.icpIterations0, p.icpIterations1, p.icpIterations2);
+        std::string reason;
+        if (!validateIcpResult(result, p, true, reason)) {
+            bestReason = reason;
+            continue;
+        }
+        float score = result.inlierRatio / (1.0f + result.residual * 25.0f);
+        if (score > bestScore) {
+            bestScore = score;
+            bestResult = result;
+        }
+    }
+    if (bestScore > 0.0f) {
+        pose = bestResult.pose.cast<float>();
+        pose_inv = pose.inverse();
+        icp->setPose(bestResult.pose);
+        m_tracking.icpResidual = bestResult.residual;
+        m_tracking.icpInlierRatio = bestResult.inlierRatio;
+        m_tracking.icpTranslationStep = bestResult.translationStep;
+        m_tracking.icpRotationStepDeg = bestResult.rotationStepDeg;
+        m_tracking.rejectionReason.clear();
+        m_tracking.state = TrackingStateRecovered;
+        m_lostFrameCount = 0;
+        m_tracking.lostFrames = 0;
+        m_recoveringFromLoss = true;
+        m_recoveryAcceptedFrames = 0;
+        publishStatusOnce("Tracking recovered by global TSDF search.");
+        return true;
+    }
+    icp->setPose(oldPose);
+    m_tracking.rejectionReason = bestReason;
+    return false;
 }
 
 void VolumeIntegration::scan(){
@@ -954,10 +1268,8 @@ bool VolumeIntegration::stepOnce(){
     const bool useDisplay = p.useDisplay;
 
     // get new kinect frames
-    if(!m_frameSource->updateFrames())
+    if(!fetchFrame())
         return false;
-    m_frameSource->getDepthMM(depth1);
-    m_frameSource->getRgbMapped2Depth(color);
 
     if (useDisplay) {
         cv::imshow("color", color);
@@ -974,6 +1286,7 @@ bool VolumeIntegration::stepOnce(){
             fb.pose       = pose;
             fb.frameIndex = m_frame.load();
             fb.fps        = m_fps;
+            fb.tracking   = m_tracking;
             m_onFrame(fb);
         }
         return false;
@@ -1010,16 +1323,62 @@ bool VolumeIntegration::stepOnce(){
     cudaDeviceSynchronize();
     CUDA_CHECK;
 
+    bool integrateFrame = true;
     if (p.poseSource == PoseSourceIcp && frame > 0) {
         cudaMemcpy(imgDepthFiltered, d_depthFiltered, bytesFloat,
                    cudaMemcpyDeviceToHost);
         CUDA_CHECK;
         convert_layered_to_mat(depthFiltered, imgDepthFiltered);
         depthFiltered *= 1000.0f;
-        // ICP
-        icp->getPoseFromDepth(depth0, depthFiltered);
-        pose = icp->getPose().cast<float>();
-        pose_inv = icp->getPose_inv().cast<float>();
+        Eigen::Matrix4d oldPose = icp->getPose();
+        const float cutoff = p.icpDepthCutoff > 0.0f ? p.icpDepthCutoff : p.raycastFar;
+        ICPResult result = icp->getPoseFromDepth(depth0, depthFiltered, cutoff,
+                                                 p.icpIterations0, p.icpIterations1, p.icpIterations2);
+        std::string reason;
+        const bool accepted = validateIcpResult(result, p, false, reason);
+        m_tracking.icpResidual = result.residual;
+        m_tracking.icpInlierRatio = result.inlierRatio;
+        m_tracking.icpTranslationStep = result.translationStep;
+        m_tracking.icpRotationStepDeg = result.rotationStepDeg;
+        if (accepted) {
+            pose = result.pose.cast<float>();
+            pose_inv = pose.inverse();
+            m_tracking.rejectionReason.clear();
+            m_lostFrameCount = 0;
+            m_tracking.lostFrames = 0;
+            if (m_recoveringFromLoss) {
+                ++m_recoveryAcceptedFrames;
+                m_tracking.state = TrackingStateRecovered;
+                integrateFrame = m_recoveryAcceptedFrames >= std::max(1, p.icpRecoveryFrameCount);
+                if (integrateFrame) {
+                    m_recoveringFromLoss = false;
+                    m_tracking.state = TrackingStateTracking;
+                    publishStatusOnce("Tracking stable; integration resumed.");
+                }
+            } else {
+                m_tracking.state = TrackingStateTracking;
+            }
+        } else {
+            icp->setPose(oldPose);
+            pose = oldPose.cast<float>();
+            pose_inv = pose.inverse();
+            m_tracking.rejectionReason = reason;
+            ++m_lostFrameCount;
+            m_tracking.lostFrames = m_lostFrameCount;
+            integrateFrame = false;
+            if (m_lostFrameCount >= std::max(1, p.icpLostFrameLimit)) {
+                m_tracking.state = TrackingStateLost;
+                publishStatusOnce(std::string("Tracking lost: ") + reason);
+                m_tracking.state = TrackingStateRecovering;
+                if (attemptGlobalRecovery(p, depthFiltered)) {
+                    integrateFrame = false;
+                } else {
+                    m_tracking.state = TrackingStateLost;
+                }
+            } else {
+                m_tracking.state = TrackingStateTracking;
+            }
+        }
     } else if (p.poseSource != PoseSourceIcp) {
         if (!m_externalPoseValid) {
             if (m_onStatus) m_onStatus("External pose source has no valid pose.");
@@ -1027,56 +1386,34 @@ bool VolumeIntegration::stepOnce(){
         }
         pose = m_externalPose;
         pose_inv = pose.inverse();
+        m_tracking.state = TrackingStateTracking;
+        m_lostFrameCount = 0;
+        m_tracking.lostFrames = 0;
+        m_recoveringFromLoss = false;
+    } else {
+        m_tracking.state = TrackingStateTracking;
+        m_lostFrameCount = 0;
+        m_tracking.lostFrames = 0;
     }
 
-    // set (inverse) camera pose and write it to constant device memory
-    for (int y = 0; y < 3; y++) {
-        for (int x = 0; x < 4; x++) {
-            size_t idx = x + 4 * y;
-            cameraPose[idx] = pose(y, x);
-            cameraPose_inv[idx] = pose_inv(y, x);
-        }
-    }
-    cudaMemcpyToSymbol(c_cameraPose, cameraPose, 4 * 3 * sizeof(float));
-    CUDA_CHECK;
-    cudaMemcpyToSymbol(c_cameraPose_inv, cameraPose_inv,
-                       4 * 3 * sizeof(float));
-    CUDA_CHECK;
+    uploadCameraPoseSymbols(pose);
 
     // sweep through the voxel grid slice by slice
-    for (size_t slice = 0; slice < slices; slice++) {
-        deviceCalculateTSDF<<<gridVoxel, block>>>(d_depth, d_color,
-                d_normals, pWidth, pHeight, p.maxTruncation, p.depthEdgeThreshold, d_voxelTSDF,
-                d_voxelWeight, d_voxelWeightColor, d_voxelRed, d_voxelGreen,
-                d_voxelBlue,voxelSize, vWidth, vHeight, slice);
-        cudaDeviceSynchronize();
-        CUDA_CHECK;
+    if (integrateFrame) {
+        for (size_t slice = 0; slice < slices; slice++) {
+            deviceCalculateTSDF<<<gridVoxel, block>>>(d_depth, d_color,
+                    d_normals, pWidth, pHeight, p.maxTruncation, p.depthEdgeThreshold,
+                    p.tsdfMaxWeight, p.tsdfConflictDecay ? 1 : 0, d_voxelTSDF,
+                    d_voxelWeight, d_voxelWeightColor, d_voxelRed, d_voxelGreen,
+                    d_voxelBlue,voxelSize, vWidth, vHeight, slice);
+            cudaDeviceSynchronize();
+            CUDA_CHECK;
+        }
     }
 
     // raycast the current model
-    deviceRaycast<<<grid, block>>>(d_voxelTSDF, d_depthModel,
-            d_voxelRed, d_voxelGreen, d_voxelBlue, pWidth, pHeight,
-            vWidth, vHeight, slices, voxelSize,
-            p.raycastNear, p.raycastFar, p.raycastStep,
-            d_imgColorRayCast);
-    CUDA_CHECK;
-    cudaDeviceSynchronize();
-    CUDA_CHECK;
-
-    cudaMemcpy(imgColorRayCast, d_imgColorRayCast, bytesFloatColor,
-               cudaMemcpyDeviceToHost);
-    CUDA_CHECK;
-    convert_layered_to_mat(mOut, imgColorRayCast);
+    raycastModelForPose(pose, 0.0f, depth0, &mOut);
     if (useDisplay) cv::imshow("raycasted", mOut);
-
-    cudaMemcpy(depthModel, d_depthModel, bytesFloat,
-               cudaMemcpyDeviceToHost);
-    CUDA_CHECK;
-    cudaMemset(d_depthModel, 0, bytesFloat);
-    CUDA_CHECK;
-
-    convert_layered_to_mat(depth0, depthModel);
-    depth0 *= 1000.0f;
     if (useDisplay) cv::imshow("depth Model", depth0 / 255.0f / 10.0f);
 
     // update fps (simple exponential moving average)
@@ -1094,6 +1431,19 @@ bool VolumeIntegration::stepOnce(){
     // increment frame counter
     m_frame.fetch_add(1);
 
+    if (m_hasBenchmarkGroundTruth) {
+        m_tracking.hasGroundTruth = true;
+        m_tracking.groundTruthPose = m_benchmarkGroundTruth;
+        m_tracking.benchmarkFrame = m_benchmarkFrame;
+        m_tracking.poseErrorM = (pose.block<3,1>(0,3) - m_benchmarkGroundTruth.block<3,1>(0,3)).norm();
+        m_tracking.poseErrorRotDeg = poseRotationErrorDeg(pose, m_benchmarkGroundTruth);
+    } else {
+        m_tracking.hasGroundTruth = false;
+        m_tracking.benchmarkFrame = -1;
+        m_tracking.poseErrorM = 0.0f;
+        m_tracking.poseErrorRotDeg = 0.0f;
+    }
+
     // publish to GUI
     if (m_onFrame) {
         FrameBundle fb;
@@ -1104,6 +1454,7 @@ bool VolumeIntegration::stepOnce(){
         fb.pose         = pose;
         fb.frameIndex   = m_frame.load();
         fb.fps          = m_fps;
+        fb.tracking     = m_tracking;
         m_onFrame(fb);
     }
     return true;
@@ -1134,6 +1485,35 @@ void VolumeIntegration::setExternalPose(const Eigen::Matrix4f &externalPose){
     m_externalPoseValid = true;
     if (m_frameSource)
         m_frameSource->setCameraPose(externalPose);
+}
+
+void VolumeIntegration::setTrackingPose(const Eigen::Matrix4f &trackingPose){
+    pose = trackingPose;
+    pose_inv = pose.inverse();
+    if (icp)
+        icp->setPose(trackingPose.cast<double>());
+}
+
+void VolumeIntegration::setBenchmarkGroundTruth(const Eigen::Matrix4f &groundTruthPose, int frameIndex){
+    m_benchmarkGroundTruth = groundTruthPose;
+    m_benchmarkFrame = frameIndex;
+    m_hasBenchmarkGroundTruth = true;
+    if (m_frameSource)
+        m_frameSource->setCameraPose(groundTruthPose);
+}
+
+void VolumeIntegration::clearBenchmarkGroundTruth(){
+    m_hasBenchmarkGroundTruth = false;
+    m_benchmarkGroundTruth = Eigen::Matrix4f::Identity();
+    m_benchmarkFrame = -1;
+}
+
+bool VolumeIntegration::forceGlobalRecovery(){
+    ScanParameters p = getParameters();
+    if (depth1.empty())
+        return false;
+    m_tracking.state = TrackingStateRecovering;
+    return attemptGlobalRecovery(p, depth1);
 }
 
 void VolumeIntegration::setOnFrame(FrameCallback cb){
@@ -1168,6 +1548,13 @@ void VolumeIntegration::reset(){
     pose_inv = Eigen::Matrix4f::Identity();
     m_externalPose = Eigen::Matrix4f::Identity();
     m_externalPoseValid = false;
+    m_tracking = TrackingDiagnostics{};
+    m_lostFrameCount = 0;
+    m_recoveryAcceptedFrames = 0;
+    m_recoveringFromLoss = false;
+    m_lastRecoveryAttemptSec = -1.0;
+    m_lastStatusMessage.clear();
+    clearBenchmarkGroundTruth();
     m_frame.store(0);
     m_fps = 0.0f;
     m_lastFrameTimeSec = 0.0;

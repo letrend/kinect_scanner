@@ -45,6 +45,7 @@ private:
     QGroupBox *buildBilateralGroup();
     QGroupBox *buildRaycastGroup();
     QGroupBox *buildIcpGroup();
+    QGroupBox *buildRecoveryGroup();
     QGroupBox *buildMcGroup();
 
     ScanParameters m_current;
@@ -81,6 +82,18 @@ private:
     QSpinBox       *m_actuatorPort = nullptr;
     QDoubleSpinBox *m_depthNoise = nullptr;
     QDoubleSpinBox *m_dropout = nullptr;
+    QCheckBox      *m_simBenchmark = nullptr;
+    QComboBox      *m_simScenario = nullptr;
+    QComboBox      *m_simMotionPreset = nullptr;
+    QLineEdit      *m_simMotionPath = nullptr;
+    QLineEdit      *m_simReportPath = nullptr;
+    QDoubleSpinBox *m_simRoomWidth = nullptr;
+    QDoubleSpinBox *m_simRoomHeight = nullptr;
+    QDoubleSpinBox *m_simRoomDepth = nullptr;
+    QSpinBox       *m_simClutter = nullptr;
+    QCheckBox      *m_simTextureFeatures = nullptr;
+    QDoubleSpinBox *m_simPoseJitterMm = nullptr;
+    QDoubleSpinBox *m_simPoseJitterDeg = nullptr;
 
     // Volume
     QSpinBox       *m_xDim = nullptr;
@@ -93,6 +106,8 @@ private:
     // TSDF
     QDoubleSpinBox *m_maxTrunc = nullptr;
     QDoubleSpinBox *m_depthEdge = nullptr;
+    QDoubleSpinBox *m_tsdfMaxWeight = nullptr;
+    QCheckBox      *m_tsdfConflictDecay = nullptr;
     // Bilateral
     QDoubleSpinBox *m_sigmaD = nullptr;
     QDoubleSpinBox *m_sigmaR = nullptr;
@@ -108,6 +123,26 @@ private:
     QSpinBox       *m_icp2 = nullptr;
     QDoubleSpinBox *m_icpDist = nullptr;
     QDoubleSpinBox *m_icpAngle = nullptr;
+    QDoubleSpinBox *m_icpMinInlier = nullptr;
+    QDoubleSpinBox *m_icpMaxResidual = nullptr;
+    QDoubleSpinBox *m_icpMaxTranslation = nullptr;
+    QDoubleSpinBox *m_icpMaxRotation = nullptr;
+    QSpinBox       *m_icpLostLimit = nullptr;
+    QSpinBox       *m_icpRecoveryFrames = nullptr;
+    QDoubleSpinBox *m_icpDepthCutoff = nullptr;
+    // Global recovery
+    QCheckBox      *m_recoveryEnabled = nullptr;
+    QSpinBox       *m_recoveryMinFrames = nullptr;
+    QDoubleSpinBox *m_recoveryMinWeight = nullptr;
+    QDoubleSpinBox *m_recoveryYawStep = nullptr;
+    QDoubleSpinBox *m_recoveryPitchMin = nullptr;
+    QDoubleSpinBox *m_recoveryPitchMax = nullptr;
+    QDoubleSpinBox *m_recoveryPitchStep = nullptr;
+    QLineEdit      *m_recoveryRadiusOffsets = nullptr;
+    QSpinBox       *m_recoveryTopCandidates = nullptr;
+    QDoubleSpinBox *m_recoveryMinInlier = nullptr;
+    QDoubleSpinBox *m_recoveryMaxResidual = nullptr;
+    QDoubleSpinBox *m_recoveryCooldown = nullptr;
     // Marching cubes
     QDoubleSpinBox *m_iso = nullptr;
 };

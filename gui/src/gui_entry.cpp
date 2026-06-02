@@ -45,7 +45,12 @@ int runGui(int argc, char *argv[]) {
     parser.addHelpOption();
     QCommandLineOption simulateOpt("simulate", "Run with the simulated frame source.");
     QCommandLineOption actuatedOpt("actuated", "Run with actuator TCP pose source.");
+    QCommandLineOption benchmarkOpt("benchmark", "Run simulated room benchmark when Start is pressed.");
     QCommandLineOption simStlOpt("sim-stl", "STL file used by simulation.", "path");
+    QCommandLineOption simScenarioOpt("sim-scenario", "Simulation scenario: object_turntable or room_object.", "name");
+    QCommandLineOption simMotionOpt("sim-motion", "Benchmark motion preset.", "name");
+    QCommandLineOption simMotionPathOpt("sim-motion-path", "JSON pose script for benchmark.", "path");
+    QCommandLineOption simReportOpt("sim-report", "Benchmark report JSON path.", "path");
     QCommandLineOption controlOpt("control-tcp",
                                   "Enable UI-control TCP server on [host:]port.",
                                   "endpoint", "127.0.0.1:5056");
@@ -54,7 +59,12 @@ int runGui(int argc, char *argv[]) {
                                    "endpoint", "0.0.0.0:5055");
     parser.addOption(simulateOpt);
     parser.addOption(actuatedOpt);
+    parser.addOption(benchmarkOpt);
     parser.addOption(simStlOpt);
+    parser.addOption(simScenarioOpt);
+    parser.addOption(simMotionOpt);
+    parser.addOption(simMotionPathOpt);
+    parser.addOption(simReportOpt);
     parser.addOption(controlOpt);
     parser.addOption(actuatorOpt);
     parser.process(app);
@@ -62,7 +72,12 @@ int runGui(int argc, char *argv[]) {
     AppOptions options;
     options.simulate = parser.isSet(simulateOpt);
     options.actuated = parser.isSet(actuatedOpt);
+    options.benchmark = parser.isSet(benchmarkOpt);
     options.simStlPath = parser.value(simStlOpt);
+    options.simScenario = parser.value(simScenarioOpt);
+    options.simMotionPreset = parser.value(simMotionOpt);
+    options.simMotionPath = parser.value(simMotionPathOpt);
+    options.simReportPath = parser.value(simReportOpt);
     parseHostPort(parser.value(controlOpt), options.controlTcpHost, options.controlTcpPort);
     parseHostPort(parser.value(actuatorOpt), options.actuatorTcpHost, options.actuatorTcpPort);
 

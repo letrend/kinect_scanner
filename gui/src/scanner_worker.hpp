@@ -70,6 +70,7 @@ public slots:
     /// the worker thread until the user finishes / aborts via the OpenCV
     /// window.
     void calibrate();
+    void recoverPose();
 
 signals:
     void initialized(ScanParameters effectiveParams);
@@ -94,6 +95,10 @@ signals:
     void simulationMeshReady(QVector<float> vertices,
                              QVector<unsigned char> colors,
                              QVector<unsigned int> indices);
+    void trackingInfo(QString state, float icpResidual, float icpInlierRatio,
+                      QString rejectionReason, int recoveryAttempts,
+                      float bestRecoveryScore, float poseErrorM,
+                      float poseErrorRotDeg, int benchmarkFrame);
 
     void statusMessage(QString msg);
     void error(QString msg);
@@ -101,6 +106,7 @@ signals:
 private:
     void runLoop();
     void runSimulationLoop();
+    void runSimulationBenchmarkLoop();
     void runActuatedLoop();
     bool waitForActuatorTarget(const ScanParameters &p, float angleDeg, float stageMm,
                                ActuatorState *state);
@@ -111,5 +117,7 @@ private:
     ActuatorTcpServer *m_actuatorServer = nullptr;
     bool m_initialized = false;
     bool m_running = false;
+    float m_lastDepthMaeM = 0.0f;
+    float m_lastDepthCompleteness = 0.0f;
     mutable QMutex m_mutex;
 };

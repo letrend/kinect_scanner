@@ -34,6 +34,7 @@ private slots:
     void onLoadPreset();
     void onSavePreset();
     void onCalibrate();
+    void onRecoverPose();
 
     void onWorkerInitialized(ScanParameters effectiveParams);
     void onWorkerStarted();
@@ -53,6 +54,10 @@ private slots:
     void onSimulationMeshReady(QVector<float> v,
                                QVector<unsigned char> c,
                                QVector<unsigned int> i);
+    void onTrackingInfo(QString state, float icpResidual, float icpInlierRatio,
+                        QString rejectionReason, int recoveryAttempts,
+                        float bestRecoveryScore, float poseErrorM,
+                        float poseErrorRotDeg, int benchmarkFrame);
     void onStatus(QString msg);
     void onError(QString msg);
     void onTcpCommand(QJsonObject command, QTcpSocket *socket);
@@ -77,6 +82,8 @@ private:
     QLabel *m_lblFrame  = nullptr;
     QLabel *m_lblPose   = nullptr;
     QLabel *m_lblState  = nullptr;
+    QLabel *m_lblTracking = nullptr;
+    QLabel *m_lblIcp = nullptr;
 
     QAction *m_actStart = nullptr;
     QAction *m_actPause = nullptr;
@@ -87,6 +94,7 @@ private:
     QAction *m_actLoadPreset  = nullptr;
     QAction *m_actSavePreset  = nullptr;
     QAction *m_actCalibrate   = nullptr;
+    QAction *m_actRecoverPose = nullptr;
 
     // Worker
     QThread        m_workerThread;
@@ -99,4 +107,13 @@ private:
     float m_lastFps = 0.0f;
     quint64 m_lastFrame = 0;
     QMatrix4x4 m_lastPose;
+    QString m_trackingState = "tracking";
+    float m_icpResidual = 0.0f;
+    float m_icpInlierRatio = 0.0f;
+    QString m_rejectionReason;
+    int m_recoveryAttempts = 0;
+    float m_bestRecoveryScore = 0.0f;
+    float m_poseErrorM = 0.0f;
+    float m_poseErrorRotDeg = 0.0f;
+    int m_benchmarkFrame = -1;
 };

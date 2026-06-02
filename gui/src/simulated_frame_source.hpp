@@ -55,6 +55,10 @@ private:
     void makeDefaultMesh(std::vector<Triangle> &triangles) const;
     void normalizeMesh(std::vector<Triangle> &triangles) const;
     void addTurntable(std::vector<Triangle> &triangles) const;
+    void addRoom(std::vector<Triangle> &triangles) const;
+    void addClutter(std::vector<Triangle> &triangles) const;
+    void addBox(std::vector<Triangle> &triangles, Vec3 mn, Vec3 mx, Vec3 color) const;
+    void translateMesh(std::vector<Triangle> &triangles, Vec3 offset) const;
     void rebuildBvh();
     int buildNode(int start, int count);
     bool intersectNode(int nodeIdx, const Vec3 &origin, const Vec3 &dir,

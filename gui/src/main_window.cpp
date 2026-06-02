@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <algorithm>
+#include <cmath>
 
 #include <QAction>
 #include <QApplication>
@@ -50,6 +51,51 @@ void effectiveVolumeCenter(const ScanParameters &p, float &cx, float &cy, float 
     cz = p.gridInitOffsetZ;
     if (cz - halfZ < minNearFaceZ) cz = halfZ + minNearFaceZ;
 }
+
+bool usesSimulationSource(const ScanParameters &p) {
+    return p.poseSource == PoseSourceSimulation || p.simulationEnabled || p.simBenchmarkEnabled;
+}
+
+bool usesActuatorSource(const ScanParameters &p) {
+    return p.poseSource == PoseSourceActuatedTcp || p.actuatorTcpEnabled;
+}
+
+bool simulationSceneChanged(const ScanParameters &a, const ScanParameters &b) {
+    return a.simScenario != b.simScenario ||
+           a.simStlPath != b.simStlPath ||
+           a.simStlScale != b.simStlScale ||
+           a.simAutoCenter != b.simAutoCenter ||
+           a.simRenderTurntable != b.simRenderTurntable ||
+           a.simRoomWidthM != b.simRoomWidthM ||
+           a.simRoomHeightM != b.simRoomHeightM ||
+           a.simRoomDepthM != b.simRoomDepthM ||
+           a.simClutterCount != b.simClutterCount ||
+           a.simTextureFeatures != b.simTextureFeatures;
+}
+
+bool volumeShapeChanged(const ScanParameters &a, const ScanParameters &b) {
+    return a.xDim != b.xDim ||
+           a.yDim != b.yDim ||
+           a.zDim != b.zDim ||
+           std::abs(a.voxelSize - b.voxelSize) > 1e-6f;
+}
+
+bool requiresWorkerReinitialize(const ScanParameters &current,
+                                const ScanParameters &next) {
+    const bool poseSourceChanged =
+        next.poseSource != current.poseSource ||
+        next.simulationEnabled != current.simulationEnabled ||
+        next.simBenchmarkEnabled != current.simBenchmarkEnabled ||
+        next.actuatorTcpEnabled != current.actuatorTcpEnabled;
+    const bool simulationActive = usesSimulationSource(current) || usesSimulationSource(next);
+    const bool actuatorActive = usesActuatorSource(current) || usesActuatorSource(next);
+    return volumeShapeChanged(current, next) ||
+           poseSourceChanged ||
+           (simulationActive && simulationSceneChanged(current, next)) ||
+           (actuatorActive &&
+                (next.actuatorTcpHost != current.actuatorTcpHost ||
+                 next.actuatorTcpPort != current.actuatorTcpPort));
+}
 } // namespace
 
 MainWindow::MainWindow(const AppOptions &options, QWidget *parent)
@@ -86,6 +132,8 @@ MainWindow::MainWindow(const AppOptions &options, QWidget *parent)
             this, &MainWindow::onMeshReady);
     connect(m_worker, &ScannerWorker::simulationMeshReady,
             this, &MainWindow::onSimulationMeshReady);
+    connect(m_worker, &ScannerWorker::trackingInfo,
+            this, &MainWindow::onTrackingInfo);
     connect(m_worker, &ScannerWorker::statusMessage,
             this, &MainWindow::onStatus);
     connect(m_worker, &ScannerWorker::error,
@@ -99,10 +147,27 @@ MainWindow::MainWindow(const AppOptions &options, QWidget *parent)
     initial.controlTcpPort = options.controlTcpPort;
     initial.actuatorTcpHost = options.actuatorTcpHost.toStdString();
     initial.actuatorTcpPort = options.actuatorTcpPort;
+    if (options.benchmark) {
+        initial.simBenchmarkEnabled = true;
+        initial.simulationEnabled = true;
+        initial.poseSource = PoseSourceIcp;
+    }
+    if (!options.simScenario.isEmpty())
+        initial.simScenario = options.simScenario.toStdString();
+    if (!options.simMotionPreset.isEmpty())
+        initial.simMotionPreset = options.simMotionPreset.toStdString();
+    if (!options.simMotionPath.isEmpty())
+        initial.simMotionPath = options.simMotionPath.toStdString();
+    if (!options.simReportPath.isEmpty())
+        initial.simReportPath = options.simReportPath.toStdString();
     if (options.simulate) {
         initial.poseSource = PoseSourceSimulation;
         initial.simulationEnabled = true;
         initial.simulationAutoStart = true;
+        initial.simStlPath = options.simStlPath.toStdString();
+        initial.useDisplay = false;
+        m_paramPanel->setParameters(initial);
+    } else if (options.benchmark) {
         initial.simStlPath = options.simStlPath.toStdString();
         initial.useDisplay = false;
         m_paramPanel->setParameters(initial);
@@ -210,7 +275,11 @@ void MainWindow::buildUi() {
     m_lblFps   = new QLabel("FPS: -");
     m_lblFrame = new QLabel("Frame: 0");
     m_lblPose  = new QLabel("Pose: 0.00, 0.00, 0.00");
+    m_lblTracking = new QLabel("Tracking: -");
+    m_lblIcp = new QLabel("ICP: -");
     statusBar()->addWidget(m_lblState);
+    statusBar()->addPermanentWidget(m_lblTracking);
+    statusBar()->addPermanentWidget(m_lblIcp);
     statusBar()->addPermanentWidget(m_lblFps);
     statusBar()->addPermanentWidget(m_lblFrame);
     statusBar()->addPermanentWidget(m_lblPose);
@@ -251,6 +320,8 @@ void MainWindow::buildToolBar() {
     tb->addSeparator();
     m_actCalibrate = tb->addAction(style->standardIcon(QStyle::SP_ComputerIcon), "Calibrate",
                                    this, &MainWindow::onCalibrate);
+    m_actRecoverPose = tb->addAction(style->standardIcon(QStyle::SP_BrowserReload), "Recover Pose",
+                                     this, &MainWindow::onRecoverPose);
 
     tb->addSeparator();
     // 3D view mode toggle: Camera Locked (third-person follows the live
@@ -276,6 +347,7 @@ void MainWindow::setRunningState(bool running) {
     m_actExtractMesh->setEnabled(!running);
     m_actSaveMesh->setEnabled(!running && m_meshAvailable);
     m_actCalibrate->setEnabled(!running);
+    m_actRecoverPose->setEnabled(true);
     m_paramPanel->setVolumeEditable(!running);
 }
 
@@ -341,6 +413,10 @@ void MainWindow::onSavePreset() {
 
 void MainWindow::onCalibrate() {
     QMetaObject::invokeMethod(m_worker, "calibrate", Qt::QueuedConnection);
+}
+
+void MainWindow::onRecoverPose() {
+    QMetaObject::invokeMethod(m_worker, "recoverPose", Qt::QueuedConnection);
 }
 
 void MainWindow::onWorkerInitialized(ScanParameters effectiveParams) {
@@ -447,6 +523,34 @@ void MainWindow::onSimulationMeshReady(QVector<float> v,
         m_viewer3d->setSimulationMesh(v, c, i);
 }
 
+void MainWindow::onTrackingInfo(QString state, float icpResidual, float icpInlierRatio,
+                                QString rejectionReason, int recoveryAttempts,
+                                float bestRecoveryScore, float poseErrorM,
+                                float poseErrorRotDeg, int benchmarkFrame) {
+    m_trackingState = state;
+    m_icpResidual = icpResidual;
+    m_icpInlierRatio = icpInlierRatio;
+    m_rejectionReason = rejectionReason;
+    m_recoveryAttempts = recoveryAttempts;
+    m_bestRecoveryScore = bestRecoveryScore;
+    m_poseErrorM = poseErrorM;
+    m_poseErrorRotDeg = poseErrorRotDeg;
+    m_benchmarkFrame = benchmarkFrame;
+
+    QString trackingText = QString("Tracking: %1").arg(state);
+    if (benchmarkFrame >= 0)
+        trackingText += QString(" ATE %1 m / %2 deg")
+                .arg(poseErrorM, 0, 'f', 3)
+                .arg(poseErrorRotDeg, 0, 'f', 1);
+    m_lblTracking->setText(trackingText);
+    QString icpText = QString("ICP: r=%1 in=%2%")
+            .arg(icpResidual, 0, 'f', 3)
+            .arg(icpInlierRatio * 100.0f, 0, 'f', 1);
+    if (!rejectionReason.isEmpty())
+        icpText += QString(" %1").arg(rejectionReason);
+    m_lblIcp->setText(icpText);
+}
+
 void MainWindow::onStatus(QString msg) {
     if (m_log) m_log->appendPlainText(msg);
 }
@@ -467,6 +571,15 @@ QJsonObject MainWindow::statusJson() const {
     out["frame"] = (double)m_lastFrame;
     out["fps"] = m_lastFps;
     out["meshAvailable"] = m_meshAvailable;
+    out["trackingState"] = m_trackingState;
+    out["icpResidual"] = m_icpResidual;
+    out["icpInlierRatio"] = m_icpInlierRatio;
+    out["rejectionReason"] = m_rejectionReason;
+    out["recoveryAttempts"] = m_recoveryAttempts;
+    out["bestRecoveryScore"] = m_bestRecoveryScore;
+    out["benchmarkFrame"] = m_benchmarkFrame;
+    out["poseErrorM"] = m_poseErrorM;
+    out["poseErrorRotDeg"] = m_poseErrorRotDeg;
     ScanParameters p = m_paramPanel->parameters();
     out["poseSource"] = p.poseSource == PoseSourceSimulation ? "simulation" :
                          p.poseSource == PoseSourceActuatedTcp ? "actuated_tcp" : "icp";
@@ -479,9 +592,16 @@ QJsonObject MainWindow::statusJson() const {
 }
 
 bool MainWindow::applyJsonParameters(const QJsonObject &params, QString *error) {
-    ScanParameters p = m_paramPanel->parameters();
+    ScanParameters current = m_paramPanel->parameters();
+    ScanParameters p = current;
     auto number = [&](const char *key, float &target) {
         if (params.contains(key)) target = (float)params.value(key).toDouble(target);
+    };
+    auto boolean = [&](const char *key, bool &target) {
+        if (params.contains(key)) target = params.value(key).toBool(target);
+    };
+    auto integer = [&](const char *key, int &target) {
+        if (params.contains(key)) target = params.value(key).toInt(target);
     };
     if (params.contains("poseSource")) {
         QString s = params.value("poseSource").toString();
@@ -497,6 +617,11 @@ bool MainWindow::applyJsonParameters(const QJsonObject &params, QString *error) 
     }
     if (params.contains("simStlPath")) p.simStlPath = params.value("simStlPath").toString().toStdString();
     if (params.contains("stlPath")) p.simStlPath = params.value("stlPath").toString().toStdString();
+    boolean("simBenchmarkEnabled", p.simBenchmarkEnabled);
+    if (params.contains("simScenario")) p.simScenario = params.value("simScenario").toString(QString::fromStdString(p.simScenario)).toStdString();
+    if (params.contains("simMotionPreset")) p.simMotionPreset = params.value("simMotionPreset").toString(QString::fromStdString(p.simMotionPreset)).toStdString();
+    if (params.contains("simMotionPath")) p.simMotionPath = params.value("simMotionPath").toString(QString::fromStdString(p.simMotionPath)).toStdString();
+    if (params.contains("simReportPath")) p.simReportPath = params.value("simReportPath").toString(QString::fromStdString(p.simReportPath)).toStdString();
     number("angleStartDeg", p.angleStartDeg);
     number("angleEndDeg", p.angleEndDeg);
     number("angleStepDeg", p.angleStepDeg);
@@ -526,11 +651,56 @@ bool MainWindow::applyJsonParameters(const QJsonObject &params, QString *error) 
         p.actuatorTcpPort = params.value("actuatorTcpPort").toInt(p.actuatorTcpPort);
     number("simDepthNoiseMm", p.simDepthNoiseMm);
     number("simDropoutPercent", p.simDropoutPercent);
+    number("simRoomWidthM", p.simRoomWidthM);
+    number("simRoomHeightM", p.simRoomHeightM);
+    number("simRoomDepthM", p.simRoomDepthM);
+    integer("simClutterCount", p.simClutterCount);
+    boolean("simTextureFeatures", p.simTextureFeatures);
+    number("simPoseJitterMm", p.simPoseJitterMm);
+    number("simPoseJitterDeg", p.simPoseJitterDeg);
     number("maxTruncation", p.maxTruncation);
     number("depthEdgeThreshold", p.depthEdgeThreshold);
+    number("tsdfMaxWeight", p.tsdfMaxWeight);
+    boolean("tsdfConflictDecay", p.tsdfConflictDecay);
     number("normalThreshold", p.normalThreshold);
+    number("raycastNear", p.raycastNear);
+    number("raycastFar", p.raycastFar);
+    number("raycastStep", p.raycastStep);
+    integer("icpIterations0", p.icpIterations0);
+    integer("icpIterations1", p.icpIterations1);
+    integer("icpIterations2", p.icpIterations2);
+    number("icpDistThresh", p.icpDistThresh);
+    number("icpAngleThresh", p.icpAngleThresh);
+    number("icpMinInlierRatio", p.icpMinInlierRatio);
+    number("icpMaxResidual", p.icpMaxResidual);
+    number("icpMaxTranslationStep", p.icpMaxTranslationStep);
+    number("icpMaxRotationStepDeg", p.icpMaxRotationStepDeg);
+    integer("icpLostFrameLimit", p.icpLostFrameLimit);
+    integer("icpRecoveryFrameCount", p.icpRecoveryFrameCount);
+    number("icpDepthCutoff", p.icpDepthCutoff);
+    boolean("globalRecoveryEnabled", p.globalRecoveryEnabled);
+    integer("globalRecoveryMinFrames", p.globalRecoveryMinFrames);
+    number("globalRecoveryMinVoxelWeight", p.globalRecoveryMinVoxelWeight);
+    number("globalRecoveryYawStepDeg", p.globalRecoveryYawStepDeg);
+    number("globalRecoveryPitchMinDeg", p.globalRecoveryPitchMinDeg);
+    number("globalRecoveryPitchMaxDeg", p.globalRecoveryPitchMaxDeg);
+    number("globalRecoveryPitchStepDeg", p.globalRecoveryPitchStepDeg);
+    if (params.contains("globalRecoveryRadiusOffsetsM"))
+        p.globalRecoveryRadiusOffsetsM = params.value("globalRecoveryRadiusOffsetsM").toString(QString::fromStdString(p.globalRecoveryRadiusOffsetsM)).toStdString();
+    integer("globalRecoveryTopCandidates", p.globalRecoveryTopCandidates);
+    number("globalRecoveryMinInlierRatio", p.globalRecoveryMinInlierRatio);
+    number("globalRecoveryMaxResidual", p.globalRecoveryMaxResidual);
+    number("globalRecoveryCooldownMs", p.globalRecoveryCooldownMs);
+    if (params.contains("xDim")) p.xDim = (unsigned)std::max(1, params.value("xDim").toInt((int)p.xDim));
+    if (params.contains("yDim")) p.yDim = (unsigned)std::max(1, params.value("yDim").toInt((int)p.yDim));
+    if (params.contains("zDim")) p.zDim = (unsigned)std::max(1, params.value("zDim").toInt((int)p.zDim));
+    number("voxelSize", p.voxelSize);
+    number("gridInitOffsetX", p.gridInitOffsetX);
+    number("gridInitOffsetY", p.gridInitOffsetY);
+    number("gridInitOffsetZ", p.gridInitOffsetZ);
+    number("isoValue", p.isoValue);
     m_paramPanel->setParameters(p);
-    if (m_running) {
+    if (m_running || !requiresWorkerReinitialize(current, p)) {
         QMetaObject::invokeMethod(m_worker, "applyParameters", Qt::QueuedConnection,
                                   Q_ARG(ScanParameters, p));
     } else {
@@ -576,6 +746,9 @@ void MainWindow::onTcpCommand(QJsonObject command, QTcpSocket *socket) {
     } else if (type == "extract_mesh") {
         onExtractMesh();
         reply["message"] = "extract accepted";
+    } else if (type == "recover_pose") {
+        onRecoverPose();
+        reply["message"] = "recover accepted";
     } else if (type == "save_mesh") {
         QString path = command.value("path").toString();
         if (path.isEmpty()) { fail("missing_path", "save_mesh requires path"); return; }

@@ -39,8 +39,17 @@ SimulatedFrameSource::SimulatedFrameSource(const ScanParameters &params)
     }
 
     normalizeMesh(mesh);
-    if (m_params.simRenderTurntable)
+    if (m_params.simScenario == "room_object") {
+        std::vector<Triangle> scene;
+        addRoom(scene);
+        addClutter(scene);
+        translateMesh(mesh, {0.0f, 1.15f, 2.7f});
+        scene.insert(scene.end(), mesh.begin(), mesh.end());
+        mesh = scene;
+        m_sourceName = QStringLiteral("procedural room + %1").arg(m_sourceName);
+    } else if (m_params.simRenderTurntable) {
         addTurntable(mesh);
+    }
     m_triangles = mesh;
     rebuildBvh();
 
@@ -235,6 +244,82 @@ void SimulatedFrameSource::addTurntable(std::vector<Triangle> &triangles) const 
         triangles.push_back(side0);
         triangles.push_back(side1);
         triangles.push_back(bottom);
+    }
+}
+
+void SimulatedFrameSource::addRoom(std::vector<Triangle> &triangles) const {
+    const float w = std::max(0.5f, m_params.simRoomWidthM);
+    const float h = std::max(0.5f, m_params.simRoomHeightM);
+    const float d = std::max(0.5f, m_params.simRoomDepthM);
+    const float floorY = 1.25f;
+    const float ceilY = floorY - h;
+    const float z0 = 0.35f;
+    const float z1 = z0 + d;
+    addBox(triangles, {-w*0.5f, floorY, z0}, {w*0.5f, floorY + 0.02f, z1}, {0.42f, 0.42f, 0.40f});
+    addBox(triangles, {-w*0.5f, ceilY - 0.02f, z0}, {w*0.5f, ceilY, z1}, {0.50f, 0.52f, 0.55f});
+    addBox(triangles, {-w*0.5f - 0.02f, ceilY, z0}, {-w*0.5f, floorY, z1}, {0.55f, 0.45f, 0.42f});
+    addBox(triangles, {w*0.5f, ceilY, z0}, {w*0.5f + 0.02f, floorY, z1}, {0.42f, 0.50f, 0.55f});
+    addBox(triangles, {-w*0.5f, ceilY, z1}, {w*0.5f, floorY, z1 + 0.02f}, {0.48f, 0.48f, 0.58f});
+    if (m_params.simTextureFeatures) {
+        for (int i = 0; i < 5; ++i) {
+            float x = -w * 0.4f + float(i) * w * 0.2f;
+            addBox(triangles, {x, ceilY + 0.25f, z1 - 0.025f},
+                   {x + 0.12f, ceilY + 0.75f, z1 - 0.005f},
+                   {0.85f - 0.08f*i, 0.35f + 0.07f*i, 0.30f});
+        }
+        for (int i = 0; i < 4; ++i) {
+            float z = z0 + 0.8f + float(i) * 0.75f;
+            addBox(triangles, {-w*0.5f - 0.005f, floorY - 0.75f, z},
+                   {-w*0.5f + 0.025f, floorY - 0.25f, z + 0.20f},
+                   {0.25f, 0.65f - 0.08f*i, 0.55f + 0.06f*i});
+        }
+    }
+}
+
+void SimulatedFrameSource::addClutter(std::vector<Triangle> &triangles) const {
+    const int n = std::max(0, m_params.simClutterCount);
+    const float w = std::max(0.5f, m_params.simRoomWidthM);
+    const float floorY = 1.25f;
+    for (int i = 0; i < n; ++i) {
+        float fx = float((i * 37) % 100) / 100.0f;
+        float fz = float((i * 53 + 11) % 100) / 100.0f;
+        float x = -w * 0.38f + fx * w * 0.76f;
+        float z = 0.9f + fz * (std::max(1.0f, m_params.simRoomDepthM) - 1.4f);
+        float sx = 0.12f + 0.05f * float(i % 3);
+        float sy = 0.18f + 0.07f * float((i + 1) % 4);
+        float sz = 0.12f + 0.05f * float((i + 2) % 3);
+        addBox(triangles, {x - sx, floorY - sy, z - sz}, {x + sx, floorY, z + sz},
+               {0.35f + 0.05f*(i%5), 0.38f + 0.04f*((i+2)%5), 0.45f + 0.03f*((i+4)%5)});
+    }
+}
+
+void SimulatedFrameSource::addBox(std::vector<Triangle> &triangles, Vec3 mn, Vec3 mx, Vec3 color) const {
+    const Vec3 v[] = {
+        {mn.x,mn.y,mn.z}, {mx.x,mn.y,mn.z}, {mx.x,mx.y,mn.z}, {mn.x,mx.y,mn.z},
+        {mn.x,mn.y,mx.z}, {mx.x,mn.y,mx.z}, {mx.x,mx.y,mx.z}, {mn.x,mx.y,mx.z}
+    };
+    const int faces[][3] = {
+        {0,2,1},{0,3,2}, {4,5,6},{4,6,7},
+        {0,1,5},{0,5,4}, {1,2,6},{1,6,5},
+        {2,3,7},{2,7,6}, {3,0,4},{3,4,7}
+    };
+    for (const auto &face : faces) {
+        Triangle t;
+        t.v0 = v[face[0]];
+        t.v1 = v[face[1]];
+        t.v2 = v[face[2]];
+        t.normal = normalize(cross(sub(t.v1, t.v0), sub(t.v2, t.v0)));
+        t.color = color;
+        triangles.push_back(t);
+    }
+}
+
+void SimulatedFrameSource::translateMesh(std::vector<Triangle> &triangles, Vec3 offset) const {
+    for (Triangle &t : triangles) {
+        t.v0 = add(t.v0, offset);
+        t.v1 = add(t.v1, offset);
+        t.v2 = add(t.v2, offset);
+        t.normal = normalize(cross(sub(t.v1, t.v0), sub(t.v2, t.v0)));
     }
 }
 

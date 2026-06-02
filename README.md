@@ -78,6 +78,12 @@ Run simulation with a specific STL:
 ./build/3D-kinect-scanner --simulate --sim-stl /path/to/object.stl
 ```
 
+Run a room-scale simulation benchmark:
+
+```bash
+./build/3D-kinect-scanner --benchmark --sim-motion room_sweep --sim-report simulation_report.json
+```
+
 Run with actuator TCP pose source:
 
 ```bash
@@ -95,7 +101,12 @@ Useful GUI options:
 ```text
 --simulate                 Use simulated Kinect frames
 --actuated                 Use actuator TCP pose source
+--benchmark                Configure simulated room benchmark
 --sim-stl PATH             STL object for simulation
+--sim-scenario NAME        object_turntable or room_object
+--sim-motion NAME          room_sweep, handheld_loop, object_orbit, tracking_loss_stress
+--sim-motion-path PATH     JSON pose script for benchmark
+--sim-report PATH          JSON benchmark report path
 --control-tcp [HOST:]PORT  UI control endpoint, default 127.0.0.1:5056
 --actuator-tcp [HOST:]PORT Actuator endpoint, default 0.0.0.0:5055
 ```
@@ -114,6 +125,14 @@ path` is empty, the simulator uses an in-memory default cube.
 
 For actuated scans, the scanner sends target poses to the actuator TCP client
 and waits for feedback before integrating frames.
+
+In ICP mode, tracking diagnostics are shown in the status bar. Bad ICP updates
+are rejected before they can move the camera pose or update the TSDF. When local
+tracking is lost, RGB/depth preview continues but TSDF fusion pauses. If enough
+mature TSDF geometry exists, global recovery searches orbit poses around the
+scan volume, refines the best candidates with ICP, and resumes fusion after the
+configured accepted-frame count. The toolbar and TCP command `recover_pose` can
+trigger one manual recovery pass.
 
 ## TCP Control
 
@@ -137,6 +156,29 @@ See [docs/tcp_protocol.md](docs/tcp_protocol.md) for the full message formats.
 Simulation generates artificial Kinect-sized depth/RGB images from the selected
 mesh and integrates them through the same TSDF pipeline as live data. The
 turntable scan path rotates around the scan volume center.
+
+Benchmark mode uses the `room_object` scenario by default: a procedural room
+with floor, ceiling, walls, colored features, clutter, and the optional STL or
+default cube. It renders from ground-truth poses while the scanner estimates
+pose with ICP, then writes a JSON report containing per-frame poses, ATE/RPE,
+ICP diagnostics, tracking state, depth residuals, and summary metrics.
+
+Benchmark motion presets:
+
+- `room_sweep`
+- `handheld_loop`
+- `object_orbit`
+- `tracking_loss_stress`
+
+Pose-script benchmarks accept:
+
+```json
+{
+  "poses": [
+    { "matrix_row_major": [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1] }
+  ]
+}
+```
 
 For clean simulated cubes or other hard-edged objects:
 

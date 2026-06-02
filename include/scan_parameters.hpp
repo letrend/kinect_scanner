@@ -37,6 +37,8 @@ struct ScanParameters {
     // ---- TSDF ----
     float maxTruncation = 0.03f;      // meters
     float depthEdgeThreshold = 0.02f; // meters; 0 disables silhouette rejection
+    float tsdfMaxWeight = 64.0f;
+    bool  tsdfConflictDecay = true;
 
     // ---- Bilateral filter ----
     float sigma_d = 5.0f;             // spatial sigma (kernel size derived; reset to apply)
@@ -56,6 +58,27 @@ struct ScanParameters {
     int   icpIterations2 = 4;
     float icpDistThresh  = 0.10f;
     float icpAngleThresh = 0.342f;    // sin(20 deg)
+    float icpMinInlierRatio = 0.03f;
+    float icpMaxResidual = 0.035f;    // meters
+    float icpMaxTranslationStep = 0.10f; // meters
+    float icpMaxRotationStepDeg = 15.0f;
+    int   icpLostFrameLimit = 3;
+    int   icpRecoveryFrameCount = 2;
+    float icpDepthCutoff = 0.0f;      // meters; <=0 means use raycastFar
+
+    // ---- Global ICP recovery ----
+    bool  globalRecoveryEnabled = true;
+    int   globalRecoveryMinFrames = 20;
+    float globalRecoveryMinVoxelWeight = 8.0f;
+    float globalRecoveryYawStepDeg = 20.0f;
+    float globalRecoveryPitchMinDeg = -35.0f;
+    float globalRecoveryPitchMaxDeg = 35.0f;
+    float globalRecoveryPitchStepDeg = 15.0f;
+    std::string globalRecoveryRadiusOffsetsM = "-0.20,0.0,0.20";
+    int   globalRecoveryTopCandidates = 12;
+    float globalRecoveryMinInlierRatio = 0.06f;
+    float globalRecoveryMaxResidual = 0.03f;
+    float globalRecoveryCooldownMs = 500.0f;
 
     // ---- Marching cubes ----
     float isoValue = 0.0f;
@@ -89,6 +112,11 @@ struct ScanParameters {
     // ---- Simulation ----
     bool simulationEnabled = false;
     bool simulationAutoStart = false;
+    bool simBenchmarkEnabled = false;
+    std::string simScenario = "object_turntable";
+    std::string simMotionPreset = "room_sweep";
+    std::string simMotionPath;
+    std::string simReportPath = "simulation_report.json";
     std::string simStlPath;
     float simStlScale = 1.0f;            // STL units -> mm
     bool simAutoCenter = true;
@@ -97,6 +125,13 @@ struct ScanParameters {
     float simDropoutPercent = 0.0f;
     float simRaycastNearMm = 100.0f;
     float simRaycastFarMm = 4000.0f;
+    float simRoomWidthM = 4.0f;
+    float simRoomHeightM = 2.6f;
+    float simRoomDepthM = 5.0f;
+    int   simClutterCount = 8;
+    bool  simTextureFeatures = true;
+    float simPoseJitterMm = 0.0f;
+    float simPoseJitterDeg = 0.0f;
 
     // ---- TCP control ----
     bool controlTcpEnabled = true;

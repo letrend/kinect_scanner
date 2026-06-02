@@ -18,6 +18,7 @@ Incoming commands:
 {"type":"load_stl","path":"/path/to/object.stl","seq":7}
 {"type":"get_status","seq":8}
 {"type":"set_params","params":{"poseSource":"actuated_tcp"},"seq":9}
+{"type":"recover_pose","seq":10}
 ```
 
 `set_params.poseSource` accepts `icp`, `actuated_tcp`, or `simulation`.
@@ -49,8 +50,41 @@ Common `set_params` fields:
   "simStlPath": "/path/to/object.stl",
   "simDepthNoiseMm": 0,
   "simDropoutPercent": 0,
+  "simBenchmarkEnabled": false,
+  "simScenario": "room_object",
+  "simMotionPreset": "room_sweep",
+  "simMotionPath": "/path/to/poses.json",
+  "simReportPath": "simulation_report.json",
+  "simRoomWidthM": 4.0,
+  "simRoomHeightM": 2.6,
+  "simRoomDepthM": 5.0,
+  "simClutterCount": 8,
+  "simTextureFeatures": true,
+  "simPoseJitterMm": 0,
+  "simPoseJitterDeg": 0,
   "maxTruncation": 0.03,
   "depthEdgeThreshold": 0.02,
+  "tsdfMaxWeight": 64,
+  "tsdfConflictDecay": true,
+  "icpMinInlierRatio": 0.03,
+  "icpMaxResidual": 0.035,
+  "icpMaxTranslationStep": 0.10,
+  "icpMaxRotationStepDeg": 15,
+  "icpLostFrameLimit": 3,
+  "icpRecoveryFrameCount": 2,
+  "icpDepthCutoff": 0,
+  "globalRecoveryEnabled": true,
+  "globalRecoveryMinFrames": 20,
+  "globalRecoveryMinVoxelWeight": 8,
+  "globalRecoveryYawStepDeg": 20,
+  "globalRecoveryPitchMinDeg": -35,
+  "globalRecoveryPitchMaxDeg": 35,
+  "globalRecoveryPitchStepDeg": 15,
+  "globalRecoveryRadiusOffsetsM": "-0.20,0.0,0.20",
+  "globalRecoveryTopCandidates": 12,
+  "globalRecoveryMinInlierRatio": 0.06,
+  "globalRecoveryMaxResidual": 0.03,
+  "globalRecoveryCooldownMs": 500,
   "normalThreshold": 0.03
 }
 ```
@@ -60,11 +94,18 @@ Replies are either:
 ```json
 {"type":"ack","seq":1,"ok":true,"message":"start accepted"}
 {"type":"error","seq":1,"code":"unknown_command","message":"..."}
-{"type":"status","seq":8,"state":"idle","frame":0,"fps":0,"meshAvailable":false}
+{"type":"status","seq":8,"state":"idle","frame":0,"fps":0,"meshAvailable":false,
+ "trackingState":"tracking","icpResidual":0.012,"icpInlierRatio":0.18,
+ "recoveryAttempts":0,"bestRecoveryScore":0,"rejectionReason":"",
+ "benchmarkFrame":-1,"poseErrorM":0,"poseErrorRotDeg":0}
 ```
 
 The UI also broadcasts event objects such as `scan_started`, `scan_stopped`,
 `mesh_ready`, and `error`.
+
+`recover_pose` runs one global TSDF recovery attempt. It is useful after local
+ICP has entered the `lost` state; fusion remains paused until tracking is
+accepted for the configured recovery-frame count.
 
 ## Actuator server
 
